@@ -177,15 +177,22 @@ OperatorFinalizeResultType ToArrowIPCFunction::FunctionFinal(ExecutionContext& c
   auto& local_state = data_p.local_state->Cast<ToArrowIpcLocalState>();
 
   if (local_state.appender) {
-    // If we have an appender, we serialize the array into a message and insert it to the
-    // chunk
+    // Flush remaining buffered data first, then come back to emit EOS
     nanoarrow::UniqueBuffer arrow_serialized_ipc_buffer;
     SerializeArray(local_state, arrow_serialized_ipc_buffer);
     InsertMessageToChunk(arrow_serialized_ipc_buffer, output);
-
-    // This is always a data message, so we set the second column to false.
     output.data[1].SetValue(0, Value::BOOLEAN(false));
+    local_state.appender.reset();
+    return OperatorFinalizeResultType::HAVE_MORE_OUTPUT;
   }
+
+  // Emit the Arrow IPC end-of-stream marker (continuation token + 0-length metadata)
+  uint8_t end_of_stream[] = {0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00};
+  nanoarrow::UniqueBuffer eos_buffer;
+  ArrowBufferInit(eos_buffer.get());
+  ArrowBufferAppend(eos_buffer.get(), end_of_stream, sizeof(end_of_stream));
+  InsertMessageToChunk(eos_buffer, output);
+  output.data[1].SetValue(0, Value::BOOLEAN(false));
 
   return OperatorFinalizeResultType::FINISHED;
 }

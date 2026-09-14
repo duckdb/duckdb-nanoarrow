@@ -92,10 +92,13 @@ def compare_ipc_buffer_writer(con, file):
     buffers = con.execute(f"FROM to_arrow_ipc((FROM read_arrow('{file}')))").fetchall()
     if not buffers:
         return
+    # Skip schema (first row) and EOS marker (last row), keep only data batches
     arrow_buffers = []
-    for i in range(1, len(buffers)):
-        # We have to concatenate the schema to the data
+    for i in range(1, len(buffers) - 1):
         arrow_buffers.append(pa.py_buffer(buffers[0][0] + buffers[i][0]))
+
+    if not arrow_buffers:
+        return
 
     batches = []
     for buffer in arrow_buffers:
@@ -105,6 +108,21 @@ def compare_ipc_buffer_writer(con, file):
             batches.extend(stream_reader)
 
     duckdb_struct_result = pa.Table.from_batches(batches, schema=schema)
+    assert compare_result(arrow_result, duckdb_struct_result, con)
+
+
+# 5. Test that concatenating all to_arrow_ipc() blobs produces a valid IPC stream
+#    (i.e., includes the end-of-stream marker)
+def compare_ipc_buffer_writer_full_stream(con, file):
+    arrow_result = ipc.open_stream(file).read_all()
+    buffers = con.execute(f"FROM to_arrow_ipc((FROM read_arrow('{file}')))").fetchall()
+    # Need at least schema + EOS (2 rows) with data in between
+    if len(buffers) < 3:
+        return
+    # Concatenate all blobs into one complete IPC stream
+    full_stream = b"".join(row[0] for row in buffers)
+    reader = ipc.RecordBatchStreamReader(pa.BufferReader(full_stream))
+    duckdb_struct_result = reader.read_all()
     assert compare_result(arrow_result, duckdb_struct_result, con)
 
 
@@ -136,3 +154,10 @@ class TestArrowIntegrationTests(object):
             compare_ipc_buffer_writer(connection, os.path.join(little_endian_folder, file))
         for file in compression_2_0_0:
             compare_ipc_buffer_writer(connection, os.path.join(compression_folder, file))
+
+    def test_write_ipc_buffer_full_stream(self, connection):
+        for file in little_big_integration_files:
+            compare_ipc_buffer_writer_full_stream(connection, os.path.join(big_endian_folder, file))
+            compare_ipc_buffer_writer_full_stream(connection, os.path.join(little_endian_folder, file))
+        for file in compression_2_0_0:
+            compare_ipc_buffer_writer_full_stream(connection, os.path.join(compression_folder, file))
