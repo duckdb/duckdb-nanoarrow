@@ -11,20 +11,33 @@ const ArrowSchema* IPCStreamReader::GetBaseSchema() {
   }
 
   ReadNextMessage({NANOARROW_IPC_MESSAGE_TYPE_SCHEMA}, /*end_of_stream_ok*/ false);
+  DecodeSchema();
+  return base_schema.get();
+}
 
-  if (decoder->feature_flags & NANOARROW_IPC_FEATURE_DICTIONARY_REPLACEMENT) {
-    throw IOException("This stream uses unsupported feature DICTIONARY_REPLACEMENT");
-  }
-
+void IPCStreamReader::DecodeSchema() {
   // Decode the schema and retain its dictionary encoding information.
   nanoarrow::ipc::UniqueDictionaryEncodings dictionary_encodings;
   THROW_NOT_OK(IOException, &error,
                ArrowIpcDecoderDecodeSchemaWithDictionaries(
                    decoder.get(), base_schema.get(), dictionary_encodings.get(), &error));
+  SetSchema(*dictionary_encodings.get());
+}
+
+void IPCStreamReader::SchemaFromFooter() {
+  // Encodings find their fields by address, so the schema moves rather than copies
+  ArrowSchemaMove(&decoder->footer->schema, base_schema.get());
+  SetSchema(decoder->footer->dictionaries);
+}
+
+void IPCStreamReader::SetSchema(const ArrowIpcDictionaryEncodings& dictionary_encodings) {
+  if (decoder->feature_flags & NANOARROW_IPC_FEATURE_DICTIONARY_REPLACEMENT) {
+    throw IOException("This stream uses unsupported feature DICTIONARY_REPLACEMENT");
+  }
 
   THROW_NOT_OK(
       IOException, &error,
-      ArrowIpcDictionariesInit(dictionaries.get(), dictionary_encodings.get(), &error));
+      ArrowIpcDictionariesInit(dictionaries.get(), &dictionary_encodings, &error));
 
   // Only the schema message carries this, later messages read back as uninitialized
   stream_endianness = decoder->endianness;
@@ -33,10 +46,8 @@ const ArrowSchema* IPCStreamReader::GetBaseSchema() {
   THROW_NOT_OK(IOException, &error,
                ArrowIpcDecoderSetEndianness(decoder.get(), decoder->endianness));
   THROW_NOT_OK(IOException, &error,
-               ArrowIpcDecoderSetSchemaWithDictionaries(
-                   decoder.get(), base_schema.get(), dictionary_encodings.get(), &error));
-
-  return base_schema.get();
+               ArrowIpcDecoderSetSchemaWithDictionaries(decoder.get(), base_schema.get(),
+                                                        &dictionary_encodings, &error));
 }
 
 bool IPCStreamReader::HasProjection() const { return !projected_fields.empty(); }

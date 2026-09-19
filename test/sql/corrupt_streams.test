@@ -62,3 +62,16 @@ query I
 SELECT 42;
 ----
 42
+
+# A remote stream is read ahead in order, and counting its rows still notices the cut
+foreach file truncated_body_zstd truncated_body_none truncated_prefix_zstd
+
+statement ok
+COPY (SELECT content FROM read_blob('{WORKING_DIRECTORY}/data/corrupt/{file}.arrows')) TO '{DATA_PATH}/{file}.arrows' (FORMAT BLOB);
+
+statement error
+SELECT count(*) FROM read_arrow('{DATA_PATH}/{file}.arrows');
+----
+Arrow IPC stream is truncated
+
+endloop

@@ -110,6 +110,24 @@ bool CopyFooterBlocks(const ArrowBuffer& source, idx_t file_size,
   return true;
 }
 
+//! Whether two schemas decode the same buffers, which names and flags do not change
+bool SameLayout(const ArrowSchema& left, const ArrowSchema& right) {
+  if (std::strcmp(left.format, right.format) != 0 ||
+      left.n_children != right.n_children ||
+      (left.dictionary == nullptr) != (right.dictionary == nullptr)) {
+    return false;
+  }
+  if (left.dictionary && !SameLayout(*left.dictionary, *right.dictionary)) {
+    return false;
+  }
+  for (int64_t i = 0; i < left.n_children; i++) {
+    if (!SameLayout(*left.children[i], *right.children[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 IPCFileStreamReader::IPCFileStreamReader(FileSystem& fs, unique_ptr<FileHandle> handle,
                                          Allocator& allocator,
@@ -128,15 +146,22 @@ bool IPCFileStreamReader::TryReadFooter() {
     return !record_batch_blocks.empty();
   }
   footer_read = true;
-  // Only the file format has a footer, and the schema read checks its leading magic
-  GetBaseSchema();
-  if (!positional || !file_magic) {
+  if (!positional) {
     return false;
   }
-  // The tail of a file is the footer size as an int32 then the bare magic
-  constexpr idx_t kFooterTailSize = sizeof(int32_t) + kArrowIPCFileMagicSize;
+  // The footer holds the schema too, so a remote file with one skips reading its start
+  const bool footer_first =
+      remote && !base_schema->release &&
+      !StringUtil::EndsWith(file_reader.handle->GetPath(), ".arrows");
+  if (!footer_first) {
+    // Only the file format has a footer, and the schema read checks its leading magic
+    GetBaseSchema();
+    if (!file_magic) {
+      return false;
+    }
+  }
   const auto file_size = file_reader.FileSize();
-  if (file_size < kArrowIPCFileHeaderSize + kFooterTailSize) {
+  if (file_size < kArrowIPCFileHeaderSize + kArrowIPCFileFooterTailSize) {
     return false;
   }
 
@@ -151,20 +176,22 @@ bool IPCFileStreamReader::TryReadFooter() {
   ArrowError footer_error{};
   if (ArrowIpcDecoderPeekFooter(
           scratch.get(),
-          AllocatedDataView(end.get() + end_size - kFooterTailSize, kFooterTailSize),
+          AllocatedDataView(end.get() + end_size - kArrowIPCFileFooterTailSize,
+                            kArrowIPCFileFooterTailSize),
           &footer_error) != NANOARROW_OK) {
     return false;
   }
   // Verification adds the tail to this size in int32, so the sum must fit there too
   const auto footer_size = static_cast<int64_t>(scratch->header_size_bytes);
-  if (footer_size <= 0 || static_cast<idx_t>(footer_size) > file_size - kFooterTailSize ||
-      footer_size >
-          NumericLimits<int32_t>::Maximum() - static_cast<int64_t>(kFooterTailSize)) {
+  if (footer_size <= 0 ||
+      static_cast<idx_t>(footer_size) > file_size - kArrowIPCFileFooterTailSize ||
+      footer_size > NumericLimits<int32_t>::Maximum() -
+                        static_cast<int64_t>(kArrowIPCFileFooterTailSize)) {
     return false;
   }
 
   // Verification rejects a window that is not the footer plus the tail
-  const auto window_size = static_cast<idx_t>(footer_size) + kFooterTailSize;
+  const auto window_size = static_cast<idx_t>(footer_size) + kArrowIPCFileFooterTailSize;
   // The verifier checks alignment, so the window gets its own allocation
   auto window = allocator.Allocate(window_size + 1);
   window.get()[window_size] = 0;
@@ -175,21 +202,55 @@ bool IPCFileStreamReader::TryReadFooter() {
   }
   const auto window_view =
       AllocatedDataView(window.get(), static_cast<int64_t>(window_size));
-  if (ArrowIpcDecoderVerifyFooter(scratch.get(), window_view, &footer_error) !=
-          NANOARROW_OK ||
-      ArrowIpcDecoderDecodeFooter(scratch.get(), window_view, &footer_error) !=
-          NANOARROW_OK) {
+  if (!DecodeFooter(*scratch.get(), window_view)) {
     return false;
   }
 
   const auto& footer = *scratch->footer;
+  // Claims decode with the footer schema, so it must match the schema the scan bound
+  if (base_schema->release && !SameLayout(*base_schema.get(), footer.schema)) {
+    return false;
+  }
   if (!CopyFooterBlocks(footer.record_batch_blocks, file_size, record_batch_blocks) ||
-      !CopyFooterBlocks(footer.dictionary_blocks, file_size, dictionary_blocks)) {
+      !CopyFooterBlocks(footer.dictionary_blocks, file_size, dictionary_blocks) ||
+      record_batch_blocks.empty()) {
     record_batch_blocks.clear();
     dictionary_blocks.clear();
     return false;
   }
-  return !record_batch_blocks.empty();
+  footer_window = std::move(window);
+  if (!base_schema->release) {
+    LoadFooter(FooterWindow());
+  }
+  return true;
+}
+
+bool IPCFileStreamReader::DecodeFooter(ArrowIpcDecoder& footer_decoder,
+                                       ArrowBufferView window) {
+  ArrowError footer_error{};
+  return ArrowIpcDecoderPeekFooter(
+             &footer_decoder,
+             AllocatedDataView(
+                 window.data.as_uint8 + window.size_bytes - kArrowIPCFileFooterTailSize,
+                 kArrowIPCFileFooterTailSize),
+             &footer_error) == NANOARROW_OK &&
+         ArrowIpcDecoderVerifyFooter(&footer_decoder, window, &footer_error) ==
+             NANOARROW_OK &&
+         ArrowIpcDecoderDecodeFooter(&footer_decoder, window, &footer_error) ==
+             NANOARROW_OK;
+}
+
+ArrowBufferView IPCFileStreamReader::FooterWindow() const {
+  // The allocation keeps a NUL past the window, which is not part of it
+  return AllocatedDataView(footer_window.get(),
+                           static_cast<int64_t>(footer_window.GetSize()) - 1);
+}
+
+void IPCFileStreamReader::LoadFooter(ArrowBufferView window) {
+  if (!DecodeFooter(*decoder.get(), window)) {
+    throw InternalException("LoadFooter needs a footer that TryReadFooter decoded");
+  }
+  SchemaFromFooter();
 }
 
 void IPCFileStreamReader::TrackProgress(shared_ptr<atomic<idx_t>> offset) {
@@ -327,18 +388,26 @@ void IPCFileStreamReader::DecodeBody() {
   }
   EnsureInputStreamAligned();
   // The padding belongs to the previous message, so take the offset after it
-  const auto body_start = file_reader.CurrentOffset();
+  const auto body_start = SequentialOffset();
   const auto body_size = static_cast<idx_t>(decoder->body_size_bytes);
-  // Seeking drops the buffer, so a body smaller than it is cheaper to read through it
-  if (skip_bodies && body_size >= FILE_BUFFER_SIZE && !NeedsEndianSwap() &&
-      CanReadBodyPositionally(body_start, body_size)) {
-    // A swap reads the buffers it rewrites, so only an unswapped body can stay unread
-    file_reader.Seek(body_start + body_size);
-    SetUnreadBody(body_size);
-    return;
+  // A swap reads the buffers it rewrites, so only an unswapped body can stay unread
+  if (skip_bodies && !NeedsEndianSwap()) {
+    // The read ahead fetches every byte anyway, and seeking drops a small body's buffer
+    if (scheduler) {
+      SequentialSeek(body_start + body_size);
+      SetUnreadBody(body_size);
+      return;
+    }
+    if (body_size >= FILE_BUFFER_SIZE && CanReadBodyPositionally(body_start, body_size)) {
+      file_reader.Seek(body_start + body_size);
+      SetUnreadBody(body_size);
+      return;
+    }
   }
   message_body = make_shared_ptr<AllocatedData>(allocator.Allocate(body_size));
-  if (CanReadBodyPositionally(body_start, body_size)) {
+  if (scheduler) {
+    SequentialRead(message_body->get(), body_size);
+  } else if (CanReadBodyPositionally(body_start, body_size)) {
     if (!TryReadProjectedBody(body_start, body_size)) {
       ReadBodyPositionally(body_start, body_size);
     }
@@ -358,8 +427,33 @@ void IPCFileStreamReader::SetUnreadBody(idx_t size) {
 }
 
 data_ptr_t IPCFileStreamReader::ReadData(data_ptr_t ptr, idx_t size) {
-  file_reader.ReadData(ptr, size);
+  SequentialRead(ptr, size);
   return ptr;
+}
+
+void IPCFileStreamReader::SequentialRead(data_ptr_t target, idx_t size) {
+  if (!scheduler) {
+    file_reader.ReadData(target, size);
+    return;
+  }
+  // A remote stream is read in order, so the bytes after the current ones download early
+  if (!read_ahead) {
+    read_ahead = make_uniq<RemoteReadAhead>(*file_reader.handle, file_reader.FileSize(),
+                                            allocator, *scheduler);
+  }
+  read_ahead->Read(target, size);
+}
+
+idx_t IPCFileStreamReader::SequentialOffset() {
+  return read_ahead ? read_ahead->Offset() : file_reader.CurrentOffset();
+}
+
+void IPCFileStreamReader::SequentialSeek(idx_t location) {
+  if (read_ahead) {
+    read_ahead->Seek(location);
+  } else {
+    file_reader.Seek(location);
+  }
 }
 
 bool IPCFileStreamReader::CanCountWithoutBodies() {
@@ -609,29 +703,28 @@ ArrowIpcMessageType IPCFileStreamReader::ReadNextMessage() {
     return NANOARROW_IPC_MESSAGE_TYPE_UNINITIALIZED;
   }
   if (progress_offset) {
-    progress_offset->store(file_reader.CurrentOffset());
+    progress_offset->store(SequentialOffset());
   }
 
   // If there is no more data to be read, we're done!
-  idx_t message_start = file_reader.CurrentOffset();
+  idx_t message_start = SequentialOffset();
   try {
     EnsureInputStreamAligned();
-    message_start = file_reader.CurrentOffset();
-    file_reader.ReadData(reinterpret_cast<data_ptr_t>(&message_prefix),
-                         sizeof(message_prefix));
+    message_start = SequentialOffset();
+    SequentialRead(reinterpret_cast<data_ptr_t>(&message_prefix), sizeof(message_prefix));
 
     // Read the embedded stream after the file header.
-    if (file_reader.CurrentOffset() == kArrowIPCFileHeaderSize &&
+    if (SequentialOffset() == kArrowIPCFileHeaderSize &&
         std::memcmp(kArrowIPCFileMagic, &message_prefix, kArrowIPCFileHeaderSize) == 0) {
       file_magic = true;
       uint32_t token;
       do {
-        file_reader.ReadData(reinterpret_cast<data_ptr_t>(&token), sizeof(token));
+        SequentialRead(reinterpret_cast<data_ptr_t>(&token), sizeof(token));
       } while (token != kContinuationToken);
       // Read the metadata size
       message_prefix.continuation_token = kContinuationToken;
-      file_reader.ReadData(reinterpret_cast<data_ptr_t>(&message_prefix.metadata_size),
-                           sizeof(message_prefix.metadata_size));
+      SequentialRead(reinterpret_cast<data_ptr_t>(&message_prefix.metadata_size),
+                     sizeof(message_prefix.metadata_size));
     } else if (message_prefix.continuation_token != kContinuationToken) {
       throw UnexpectedToken(message_prefix.continuation_token);
     }
@@ -653,11 +746,11 @@ ArrowIpcMessageType IPCFileStreamReader::ReadNextMessage() {
 
 void IPCFileStreamReader::EnsureInputStreamAligned() {
   uint8_t padding[8];
-  int padding_bytes = 8 - (file_reader.CurrentOffset() % 8);
+  int padding_bytes = 8 - (SequentialOffset() % 8);
   if (padding_bytes != 8) {
-    file_reader.ReadData(padding, padding_bytes);
+    SequentialRead(padding, padding_bytes);
   }
-  D_ASSERT((file_reader.CurrentOffset() % 8) == 0);
+  D_ASSERT((SequentialOffset() % 8) == 0);
 }
 
 }  // namespace ext_nanoarrow

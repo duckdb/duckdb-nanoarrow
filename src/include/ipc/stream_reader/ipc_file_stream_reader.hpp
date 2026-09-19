@@ -39,6 +39,10 @@ class IPCFileStreamReader final : public IPCStreamReader {
 
   //! Reads the footer once, false when the file has none and the scan stays sequential
   bool TryReadFooter();
+  //! The footer TryReadFooter decoded, with its size and magic
+  ArrowBufferView FooterWindow() const;
+  //! Takes the schema from the footer another reader of the file read, instead of reading
+  void LoadFooter(ArrowBufferView window);
   //! The record batch blocks named by the footer, empty when there is no footer
   const vector<ArrowIpcFileBlock>& RecordBatchBlocks() const {
     return record_batch_blocks;
@@ -75,6 +79,8 @@ class IPCFileStreamReader final : public IPCStreamReader {
   bool remote = false;
   //! Runs the reads of a remote file at the same time, none for a local one
   optional_ptr<TaskScheduler> scheduler;
+  //! Fetches a remote stream ahead of the sequential reads, made on the first one
+  unique_ptr<RemoteReadAhead> read_ahead;
   //! The claimed blocks in memory, empty until FetchBlocks runs
   vector<FetchedBlock> fetched_blocks;
   idx_t fetched_index = 0;
@@ -82,6 +88,8 @@ class IPCFileStreamReader final : public IPCStreamReader {
   vector<ArrowIpcFileBlock> record_batch_blocks;
   vector<ArrowIpcFileBlock> dictionary_blocks;
   bool footer_read = false;
+  //! The footer, its size and the magic, for claim readers to take the schema from
+  AllocatedData footer_window;
   //! Whether the file starts with the magic of the file format, which has a footer
   bool file_magic = false;
   //! The claimed blocks still to read, both null outside a block scan
@@ -105,6 +113,8 @@ class IPCFileStreamReader final : public IPCStreamReader {
   bool ProjectedRanges(const_data_ptr_t base, idx_t body_size, vector<BodyRange>& merged);
   //! Ranges closer than this are read together
   idx_t CoalesceGap() const;
+  //! Verifies and decodes a footer window into the decoder
+  static bool DecodeFooter(ArrowIpcDecoder& footer_decoder, ArrowBufferView window);
   //! Plans one read per run of neighbouring blocks, or of only their headers
   void PlanRuns(const vector<idx_t>& indexes, bool headers_only,
                 vector<FetchedBlock>& fetched, vector<FileRead>& reads);
@@ -121,6 +131,10 @@ class IPCFileStreamReader final : public IPCStreamReader {
                                          const FetchedBlock& fetched);
 
   data_ptr_t ReadData(data_ptr_t ptr, idx_t size) override;
+  //! Reads the stream in order, through the read ahead for remote files
+  void SequentialRead(data_ptr_t target, idx_t size);
+  idx_t SequentialOffset();
+  void SequentialSeek(idx_t location);
   bool DecodeHeader(idx_t message_header_size) override;
   void DecodeBody() override;
   nanoarrow::UniqueBuffer GetUniqueBuffer() override;

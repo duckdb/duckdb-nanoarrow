@@ -64,6 +64,12 @@ class IPCStreamReader {
   idx_t DecodeMetadata();
   //! Validate and decode a complete header, returning true for end of stream
   bool DecodeHeaderBuffer(ArrowBufferView header);
+  //! Decodes the schema message the decoder holds and prepares it for batches
+  void DecodeSchema();
+  //! Takes the schema of the footer the decoder decoded last, which files carry too
+  void SchemaFromFooter();
+  //! Prepares the decoder for batches of the base schema
+  void SetSchema(const ArrowIpcDictionaryEncodings& dictionary_encodings);
   //! 2. We decode the message head, if message is finished we return true
   virtual bool DecodeHeader(idx_t message_header_size) {
     throw InternalException("IPCStreamReader::DecodeHead not implemented");

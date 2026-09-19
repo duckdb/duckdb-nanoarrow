@@ -75,6 +75,8 @@ class ArrowFileScan : public BaseFileReader {
   const idx_t scan_id;
   vector<ArrowIpcFileBlock> blocks;
   vector<ArrowIpcFileBlock> dictionary_blocks;
+  //! The footer, which claim readers take the schema from instead of reading the file
+  AllocatedData footer_window;
   vector<BlockRange> claims;
   //! Whether a scan that reads no file column can count rows from the headers
   bool count_without_bodies = false;
