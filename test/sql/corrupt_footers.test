@@ -18,7 +18,13 @@ SELECT count(*), sum(i), sum(j) FROM read_arrow('{WORKING_DIRECTORY}/data/corrup
 ----
 1000	499500	999000
 
-# A remote file checks its footer blocks the same way
+# The footer schema has one column where the schema message has two
+query I
+SELECT j FROM read_arrow('{WORKING_DIRECTORY}/data/corrupt/footer_schema_mismatch.arrow') WHERE i = 999;
+----
+1998
+
+# A remote file reads its footer first, so the same checks keep it on the stream
 foreach file footer_block_overflow footer_short_metadata
 
 statement ok

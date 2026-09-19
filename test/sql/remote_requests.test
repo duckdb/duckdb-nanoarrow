@@ -33,9 +33,9 @@ SELECT max(COLUMNS(*)) FROM read_arrow('{DATA_PATH}/wide.arrow');
 ----
 1999999	999	100002	item_9999
 
-# Reading in 4 KB requests took eighteen thousand, the footer and each block now take one
+# The footer holds the schema, so the scan reads it and then each block once
 query I
-SELECT count(*) <= 6 FROM duckdb_logs_parsed('HTTP') WHERE request.type = 'GET';
+SELECT count(*) <= 3 FROM duckdb_logs_parsed('HTTP') WHERE request.type = 'GET';
 ----
 true
 
@@ -72,14 +72,14 @@ true
 statement ok
 CALL truncate_duckdb_logs();
 
-# Each of the five files is one claim, fetched at once instead of batch by batch
+# Each of the five files reads its footer and then fetches its one claim at once
 query II
 SELECT count(*), sum(k) FROM read_arrow('{DATA_PATH}/many/*.arrow');
 ----
 200000	599994
 
 query I
-SELECT count(*) <= 21 FROM duckdb_logs_parsed('HTTP') WHERE request.type = 'GET';
+SELECT count(*) <= 11 FROM duckdb_logs_parsed('HTTP') WHERE request.type = 'GET';
 ----
 true
 

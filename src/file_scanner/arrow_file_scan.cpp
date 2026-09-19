@@ -21,6 +21,9 @@ ArrowFileScan::ArrowFileScan(ClientContext& context, const OpenFileInfo& file)
   factory = make_uniq<FileIPCStreamFactory>(context, file);
 
   factory->InitReader();
+  auto& reader = static_cast<IPCFileStreamReader&>(*factory->reader);
+  // A remote footer carries the schema, so reading it first skips the start of the file
+  const bool has_footer = reader.TryReadFooter();
   factory->GetFileSchema(schema_root);
   ArrowTableFunction::PopulateArrowTableSchema(context, arrow_table,
                                                schema_root.arrow_schema);
@@ -32,15 +35,18 @@ ArrowFileScan::ArrowFileScan(ClientContext& context, const OpenFileInfo& file)
   columns = MultiFileColumnDefinition::ColumnsFromNamesAndTypes(
       StringsToIdentifiers(names), types);
 
-  auto& reader = static_cast<IPCFileStreamReader&>(*factory->reader);
   // Scans move this reader away, so progress and estimates keep their own copies
   file_size = reader.FileSize();
   reader.TrackProgress(progress_offset);
   count_without_bodies = reader.CanCountWithoutBodies();
-  if (reader.TryReadFooter()) {
+  if (has_footer) {
     PlanClaims(reader.RecordBatchBlocks(),
                reader.IsRemote() ? kRemoteMinClaimBodyBytes : kMinClaimBodyBytes);
     dictionary_blocks = reader.DictionaryBlocks();
+    const auto window = reader.FooterWindow();
+    footer_window = factory->allocator.Allocate(static_cast<idx_t>(window.size_bytes));
+    std::memcpy(footer_window.get(), window.data.data,
+                static_cast<size_t>(window.size_bytes));
   }
 }
 
@@ -165,8 +171,9 @@ void ArrowFileScan::PrepareScan(ClientContext& context,
     lstate.local_arrow_global_state.reset();
     lstate.block_scan_id = 0;
     lstate.block_reader = factory->OpenReader();
-    // The schema is read in stream order, before the reader seeks to any block
-    lstate.block_reader->GetBaseSchema();
+    // The schema comes from the footer copy, so a claim costs no read of the file start
+    lstate.block_reader->LoadFooter(ArrowBufferView{
+        {footer_window.get()}, static_cast<int64_t>(footer_window.GetSize())});
     // Each reader decodes the dictionaries once, since a file cannot replace them
     if (!count_only) {
       lstate.block_reader->LoadDictionaries(dictionary_blocks);
