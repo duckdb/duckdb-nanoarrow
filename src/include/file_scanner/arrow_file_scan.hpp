@@ -26,7 +26,7 @@ class ArrowFileScan : public BaseFileReader {
   ~ArrowFileScan() override = default;
 
   //! Factory of this stream
-  unique_ptr<FileIPCStreamFactory> factory;
+  shared_ptr<FileIPCStreamFactory> factory;
 
   string GetReaderType() const override;
 
@@ -62,12 +62,10 @@ class ArrowFileScan : public BaseFileReader {
 
   //! Groups the footer blocks into claims of at least this many body bytes
   void PlanClaims(const vector<ArrowIpcFileBlock>& file_blocks, idx_t min_claim_bytes);
-  void InitializeScanData(ArrowFileLocalState& lstate, stream_factory_produce_t producer,
-                          uintptr_t producer_data);
+  void InitializeScanData(ArrowFileLocalState& lstate,
+                          shared_ptr<ArrowScanFactory> producer);
   void StartScan(ClientContext& context, ArrowFileLocalState& lstate);
   static void FinishClaim(ArrowFileLocalState& lstate);
-  static unique_ptr<ArrowArrayStreamWrapper> ProduceBlocks(
-      uintptr_t local_state, ArrowStreamParameters& parameters);
 
   vector<string> names;
   vector<LogicalType> types;

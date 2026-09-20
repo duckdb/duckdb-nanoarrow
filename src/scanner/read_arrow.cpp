@@ -21,7 +21,6 @@
 #include "ipc/stream_factory.hpp"
 #include "ipc/stream_reader/base_stream_reader.hpp"
 #include "nanoarrow_errors.hpp"
-#include "table_function/arrow_ipc_function_data.hpp"
 
 // read_arrow() implementation
 //

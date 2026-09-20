@@ -14,17 +14,38 @@ constexpr idx_t kMinClaimBodyBytes = 1024 * 1024;
 //! A remote claim is fetched with few requests, so it holds more to keep them large
 constexpr idx_t kRemoteMinClaimBodyBytes = 16 * 1024 * 1024;
 atomic<idx_t> next_scan_id{1};
+
+//! Streams the blocks claimed from the reader of one scan state
+class ClaimScanFactory final : public ArrowScanFactory {
+ public:
+  explicit ClaimScanFactory(IPCFileStreamReader& reader) : reader(reader) {}
+
+  void GetSchema(ArrowSchema& schema) override {
+    NANOARROW_THROW_NOT_OK(ArrowSchemaDeepCopy(reader.GetBaseSchema(), &schema));
+  }
+
+  unique_ptr<ArrowArrayStreamWrapper> ProduceStream(
+      ArrowStreamParameters& parameters) override {
+    // PrepareScan already gave the reader the projection these parameters carry
+    auto out = make_uniq<ArrowArrayStreamWrapper>();
+    IpcArrayStream(reader).ToArrayStream(&out->arrow_array_stream);
+    return out;
+  }
+
+ private:
+  IPCFileStreamReader& reader;
+};
 }  // namespace
 
 ArrowFileScan::ArrowFileScan(ClientContext& context, const OpenFileInfo& file)
     : BaseFileReader(file), scan_id(next_scan_id++) {
-  factory = make_uniq<FileIPCStreamFactory>(context, file);
+  factory = make_shared_ptr<FileIPCStreamFactory>(context, file);
 
   factory->InitReader();
   auto& reader = static_cast<IPCFileStreamReader&>(*factory->reader);
   // A remote footer carries the schema, so reading it first skips the start of the file
   const bool has_footer = reader.TryReadFooter();
-  factory->GetFileSchema(schema_root);
+  factory->GetSchema(schema_root.arrow_schema);
   ArrowTableFunction::PopulateArrowTableSchema(context, arrow_table,
                                                schema_root.arrow_schema);
   names = arrow_table.GetNames();
@@ -97,10 +118,9 @@ bool ArrowFileScan::TryInitializeScan(ClientContext& context,
 }
 
 void ArrowFileScan::InitializeScanData(ArrowFileLocalState& lstate,
-                                       stream_factory_produce_t producer,
-                                       uintptr_t producer_data) {
+                                       shared_ptr<ArrowScanFactory> producer) {
   lstate.local_arrow_function_data =
-      make_uniq<ArrowScanFunctionData>(producer, producer_data);
+      make_uniq<ArrowScanFunctionData>(std::move(producer));
   // A memberwise copy shares the release pointer, so a second scan would free it twice
   NANOARROW_THROW_NOT_OK(
       ArrowSchemaDeepCopy(&schema_root.arrow_schema,
@@ -128,15 +148,6 @@ void ArrowFileScan::StartScan(ClientContext& context, ArrowFileLocalState& lstat
       lstate.local_arrow_global_state.get());
 }
 
-unique_ptr<ArrowArrayStreamWrapper> ArrowFileScan::ProduceBlocks(
-    uintptr_t local_state, ArrowStreamParameters& parameters) {
-  // PrepareScan already gave the reader the projection these parameters carry
-  auto& lstate = *reinterpret_cast<ArrowFileLocalState*>(local_state);
-  auto out = make_uniq<ArrowArrayStreamWrapper>();
-  IpcArrayStream(*lstate.block_reader).ToArrayStream(&out->arrow_array_stream);
-  return out;
-}
-
 void ArrowFileScan::PrepareScan(ClientContext& context,
                                 GlobalTableFunctionState& gstate_p,
                                 LocalTableFunctionState& lstate_p) {
@@ -159,8 +170,7 @@ void ArrowFileScan::PrepareScan(ClientContext& context,
       lstate.count_reader = lstate.count_owned_reader.get();
       return;
     }
-    InitializeScanData(lstate, &FileIPCStreamFactory::Produce,
-                       reinterpret_cast<uintptr_t>(factory.get()));
+    InitializeScanData(lstate, factory);
     return;
   }
   // A state keeps its reader for the next claim of the same file
@@ -178,8 +188,7 @@ void ArrowFileScan::PrepareScan(ClientContext& context,
     if (!count_only) {
       lstate.block_reader->LoadDictionaries(dictionary_blocks);
     }
-    InitializeScanData(lstate, &ArrowFileScan::ProduceBlocks,
-                       reinterpret_cast<uintptr_t>(&lstate));
+    InitializeScanData(lstate, make_shared_ptr<ClaimScanFactory>(*lstate.block_reader));
     // The fetch needs the projection before the scan that would push it starts
     if (!count_only) {
       vector<idx_t> projection;

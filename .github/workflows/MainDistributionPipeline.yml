@@ -17,7 +17,7 @@ jobs:
     name: Build extension binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
     with:
-      # The duckdb submodule commit, until the ArrowScanFactory API of duckdb#25726 is ported
-      duckdb_version: 38c5eebcb09d8d315fdd2875e778d710ebd5f9d1
+      # The duckdb submodule commit, so changes on the v2.0 branch tip cannot break builds
+      duckdb_version: 3a604ab6d4d66910ad91bf7669c0b5f648a00190
       ci_tools_version: main
       extension_name: nanoarrow

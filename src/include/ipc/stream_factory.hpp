@@ -22,22 +22,19 @@ class IPCFileStreamReader;
 class ArrowStreamFactory {
   ArrowStreamFactory() {};
 };
-//! This Factory is a type invented by DuckDB. Notably, the Produce()
-//! function pointer is passed to the constructor of the ArrowScanFunctionData
-//! constructor (which we wrap).
-class ArrowIPCStreamFactory {
+//! Hands DuckDB's Arrow scan the stream of one reader, which the scan data keeps alive
+class ArrowIPCStreamFactory : public ArrowScanFactory {
  public:
-  virtual ~ArrowIPCStreamFactory() = default;
   explicit ArrowIPCStreamFactory(Allocator& allocator);
 
-  //! Called once when initializing Scan States
-  static unique_ptr<ArrowArrayStreamWrapper> Produce(uintptr_t factory_ptr,
-                                                     ArrowStreamParameters& parameters);
+  //! Moves the reader into the stream, so a factory produces once
+  unique_ptr<ArrowArrayStreamWrapper> ProduceStream(
+      ArrowStreamParameters& parameters) override;
   //! The projected top level columns in output order, empty when nothing is projected
   static vector<idx_t> ProjectedColumnIndexes(const ArrowStreamParameters& parameters);
 
-  //! Get the schema of the arrow object
-  void GetFileSchema(ArrowSchemaWrapper& schema) const;
+  //! Copies the schema of the reader
+  void GetSchema(ArrowSchema& schema) override;
 
   //! Opens the file, wraps it in the ArrowIpcInputStream, and wraps it in
   //! the ArrowArrayStream reader.
