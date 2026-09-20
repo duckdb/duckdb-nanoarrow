@@ -1,0 +1,18 @@
+# name: test/sql/large_body.test_slow
+# description: A record batch body of 2 GiB or more is read in pieces, since one read of that size fails on macOS
+# group: [sql]
+
+require nanoarrow
+
+# One BIGINT column of 2^28 + 4096 rows is a body 32 KB past 2^31, and writing it peaks near 9 GB
+foreach format arrow arrows
+
+statement ok
+COPY (SELECT 0::BIGINT AS i FROM range(268439552)) TO '{TEST_DIR}/large_body.${format}' (FORMAT ${format}, ROW_GROUP_SIZE 268439552);
+
+query II
+SELECT count(*), sum(i) FROM read_arrow('{TEST_DIR}/large_body.${format}');
+----
+268439552	0
+
+endloop

@@ -15,6 +15,8 @@ constexpr idx_t kFirstBatchBytes = 1024 * 1024;
 constexpr idx_t kMaxBatchBytes = 128 * 1024 * 1024;
 //! Each concurrent read of a batch, large enough that transfer outweighs the round trip
 constexpr idx_t kChunkBytes = 4 * 1024 * 1024;
+//! The most bytes of one read, which pread rejects from 2 GiB on macOS
+constexpr idx_t kMaxReadBytes = 1024 * 1024 * 1024;
 
 //! Runs one read on the executor's pool
 class FileReadTask : public BaseExecutorTask {
@@ -22,7 +24,7 @@ class FileReadTask : public BaseExecutorTask {
   FileReadTask(TaskExecutor& executor, FileHandle& handle, const FileRead& read)
       : BaseExecutorTask(executor), handle(handle), read(read) {}
 
-  void ExecuteTask() override { handle.Read(read.target, read.size, read.location); }
+  void ExecuteTask() override { ReadAt(handle, read); }
 
  private:
   FileHandle& handle;
@@ -30,6 +32,13 @@ class FileReadTask : public BaseExecutorTask {
 };
 
 }  // namespace
+
+void ReadAt(FileHandle& handle, const FileRead& read) {
+  for (idx_t done = 0; done < read.size; done += kMaxReadBytes) {
+    const auto size = MinValue<idx_t>(kMaxReadBytes, read.size - done);
+    handle.Read(read.target + done, size, read.location + done);
+  }
+}
 
 void ScheduleReads(TaskExecutor& executor, FileHandle& handle,
                    const vector<FileRead>& reads) {

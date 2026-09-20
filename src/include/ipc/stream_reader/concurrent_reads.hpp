@@ -22,6 +22,8 @@ struct FileRead {
   idx_t location;
 };
 
+//! Runs one read in pieces, since a single read of 2 GiB or more fails on macOS
+void ReadAt(FileHandle& handle, const FileRead& read);
 //! Schedules each read as a task of the executor, which runs on the executor's pool
 void ScheduleReads(TaskExecutor& executor, FileHandle& handle,
                    const vector<FileRead>& reads);

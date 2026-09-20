@@ -280,9 +280,9 @@ void IPCFileStreamReader::ReadBodyPositionally(idx_t body_start, idx_t body_size
   const auto buffered =
       MinValue<idx_t>(file_reader.read_data - file_reader.offset, body_size);
   ReadData(message_body->get(), buffered);
-  // One read replaces the 4 KB reads the buffered reader would issue
-  file_reader.handle->Read(message_body->get() + buffered, body_size - buffered,
-                           body_start + buffered);
+  // Positional reads replace the 4 KB reads the buffered reader would issue
+  ReadAt(*file_reader.handle, FileRead{message_body->get() + buffered,
+                                       body_size - buffered, body_start + buffered});
   file_reader.Seek(body_start + body_size);
 }
 
@@ -352,8 +352,9 @@ bool IPCFileStreamReader::TryReadProjectedBody(idx_t body_start, idx_t body_size
     return false;
   }
   for (const auto& range : merged) {
-    file_reader.handle->Read(message_body->get() + range.begin, range.end - range.begin,
-                             body_start + range.begin);
+    ReadAt(*file_reader.handle,
+           FileRead{message_body->get() + range.begin, range.end - range.begin,
+                    body_start + range.begin});
   }
   file_reader.Seek(body_start + body_size);
   return true;
@@ -599,7 +600,7 @@ void IPCFileStreamReader::ReadAll(const vector<FileRead>& reads) {
     return;
   }
   for (const auto& read : reads) {
-    file_reader.handle->Read(read.target, read.size, read.location);
+    ReadAt(*file_reader.handle, read);
   }
 }
 
