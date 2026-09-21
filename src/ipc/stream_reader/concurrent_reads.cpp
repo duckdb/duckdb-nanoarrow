@@ -40,6 +40,17 @@ void ReadAt(FileHandle& handle, const FileRead& read) {
   }
 }
 
+vector<FileRead> SplitReads(const vector<FileRead>& reads, idx_t max_bytes) {
+  vector<FileRead> pieces;
+  for (const auto& read : reads) {
+    for (idx_t begin = 0; begin < read.size; begin += max_bytes) {
+      const auto size = MinValue<idx_t>(max_bytes, read.size - begin);
+      pieces.push_back(FileRead{read.target + begin, size, read.location + begin});
+    }
+  }
+  return pieces;
+}
+
 void ScheduleReads(TaskExecutor& executor, FileHandle& handle,
                    const vector<FileRead>& reads) {
   for (const auto& read : reads) {
@@ -77,11 +88,8 @@ void RemoteReadAhead::Launch(Batch& batch, idx_t begin) {
   batch.end = begin + MinValue<idx_t>(next_batch_size, file_size - begin);
   next_batch_size = MinValue<idx_t>(next_batch_size * 2, kMaxBatchBytes);
   batch.data = allocator.Allocate(batch.end - batch.begin);
-  vector<FileRead> chunks;
-  for (idx_t chunk = batch.begin; chunk < batch.end; chunk += kChunkBytes) {
-    const auto size = MinValue<idx_t>(kChunkBytes, batch.end - chunk);
-    chunks.push_back(FileRead{batch.data.get() + (chunk - batch.begin), size, chunk});
-  }
+  const auto chunks = SplitReads(
+      {FileRead{batch.data.get(), batch.end - batch.begin, batch.begin}}, kChunkBytes);
   batch.executor = make_uniq<TaskExecutor>(scheduler, TaskSchedulerType::ASYNC);
   ScheduleReads(*batch.executor, handle, chunks);
   launched_batches++;
