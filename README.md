@@ -95,6 +95,7 @@ COPY (SELECT 42 as foofy, 'string' as stringy) TO "test.arrows" (COMPRESSION 'zs
 * `total_compressed_size`: The size of all record batch bodies as stored, including compression prefixes and buffer padding. It excludes message headers, the schema and file framing, and is counted the same way as `size_metadata`.
 * `total_uncompressed_size`: The size of all record batch bodies after decompression, including buffer padding. It equals `total_compressed_size` for uncompressed output.
 * `peak_read_memory_bytes`: An upper bound on the memory a reader needs at any point while decoding the file. It assumes the reader allocates in powers of two, as arrow-java does, and holds two adjacent record batches at once. It counts the metadata a file reader reads with each batch, the validity bitmaps such a reader allocates for columns written without one, and up to 63 bytes of alignment per allocation, so it can also size an arena that aligns each allocation to 64 bytes.
+* `schema_size_bytes`: The size of the schema message as written, including its continuation marker, length prefix and padding. The record batches follow it and span `file_size_bytes - footer_size_bytes - 26 - schema_size_bytes` bytes in a file and `file_size_bytes - 8 - schema_size_bytes` in a stream. Without `size_metadata` the files of one `COPY` share it, so their record batches can be joined into one stream. A file with no record batches has an empty span, so a reader can skip it.
 
 ```sql
 COPY (SELECT * FROM range(10000)) TO 's3://bucket/stats.arrow' (RETURN_STATS);

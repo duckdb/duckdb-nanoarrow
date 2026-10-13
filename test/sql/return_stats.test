@@ -22,6 +22,12 @@ SELECT extra_info['total_compressed_size']::UBIGINT = extra_info['total_uncompre
 ----
 true
 
+# The schema message follows the 8-byte header and the record batches follow it
+query I
+SELECT extra_info['schema_size_bytes']::UBIGINT FROM file_stats
+----
+144
+
 # Compression only shrinks what is stored, the uncompressed total is the same
 statement ok
 CREATE TABLE zstd_stats AS WITH s AS (COPY (SELECT i AS id FROM range(5000) t(i)) TO '{DATA_PATH}/stats_zstd.arrow' (FORMAT ARROW, CHUNK_SIZE 2048, COMPRESSION 'zstd', RETURN_STATS)) SELECT * FROM s
@@ -30,6 +36,12 @@ query II
 SELECT z.extra_info['total_compressed_size']::UBIGINT < f.extra_info['total_compressed_size']::UBIGINT, z.extra_info['total_uncompressed_size']::UBIGINT = f.extra_info['total_uncompressed_size']::UBIGINT FROM zstd_stats z, file_stats f
 ----
 true	true
+
+# A compressed schema also lists the COMPRESSED_BODY feature
+query I
+SELECT extra_info['schema_size_bytes']::UBIGINT FROM zstd_stats
+----
+152
 
 # A stream has no footer
 statement ok
@@ -40,6 +52,12 @@ SELECT count, footer_size_bytes FROM stream_stats
 ----
 1	NULL
 
+# A stream starts with the schema message
+query I
+SELECT extra_info['schema_size_bytes']::UBIGINT FROM stream_stats
+----
+144
+
 # Every file a COPY writes gets its own row
 statement ok
 CREATE TABLE part_stats AS WITH s AS (COPY (SELECT i AS id FROM range(10000) t(i)) TO '{DATA_PATH}/parts' (FORMAT ARROW, CHUNK_SIZE 2048, ROW_GROUPS_PER_FILE 2, RETURN_STATS)) SELECT * FROM s
@@ -48,3 +66,18 @@ query II
 SELECT count(*), sum(count) FROM part_stats
 ----
 3	10000
+
+# Every file of one COPY starts with the same schema message
+query II
+SELECT count(DISTINCT extra_info['schema_size_bytes']::UBIGINT), min(extra_info['schema_size_bytes']::UBIGINT) FROM part_stats
+----
+1	144
+
+# The record batches span the file less the schema, the footer and 26 bytes of framing
+statement ok
+CREATE TABLE range_stats AS WITH s AS (COPY (SELECT * FROM range(5000)) TO '{DATA_PATH}/range_stats.arrow' (FORMAT ARROW, CHUNK_SIZE 2048, RETURN_STATS)) SELECT * FROM s
+
+query IIIIIIII
+SELECT count, file_size_bytes, footer_size_bytes, extra_info['record_batch_count']::UBIGINT, extra_info['total_compressed_size']::UBIGINT, extra_info['peak_read_memory_bytes']::UBIGINT, extra_info['schema_size_bytes']::UBIGINT, file_size_bytes - footer_size_bytes - 26 - extra_info['schema_size_bytes']::UBIGINT FROM range_stats
+----
+5000	40874	240	3	40000	66363	152	40456

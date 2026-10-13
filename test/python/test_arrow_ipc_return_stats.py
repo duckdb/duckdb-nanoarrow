@@ -73,6 +73,15 @@ def schema_buffer_count(schema):
     return 1 + sum(type_buffer_count(field.type) for field in schema)
 
 
+def schema_message_size(data, start):
+    """The size of the schema message at start: the continuation marker, the int32 length
+    and that many bytes of flatbuffer and padding"""
+    assert data[start:start + 4] == b"\xff\xff\xff\xff"
+    length = int.from_bytes(data[start + 4:start + 8], 'little')
+    assert data[start + 8 + length:start + 8 + length + 4] == b"\xff\xff\xff\xff"
+    return 8 + length
+
+
 def expected_stats(path, compressed_output):
     """Recomputes the statistics from the written file, as the requirements define them"""
     with open(path, 'rb') as f:
@@ -107,6 +116,8 @@ def expected_stats(path, compressed_output):
         "total_compressed_size": sum(bodies),
         "total_uncompressed_size": sum(uncompressed),
         "peak_read_memory_bytes": max(pair_peak, 64) + 63 * (schema_buffer_count(reader.schema) + 2),
+        # The schema message follows the 8-byte ARROW1 header
+        "schema_size_bytes": schema_message_size(data, 8),
     }
 
 
@@ -145,6 +156,23 @@ def test_return_stats_totals_match_size_metadata(connection, tmp_path, compressi
     assert int(row["extra_info"]["total_uncompressed_size"]) == int(metadata[b"total_uncompressed_size"])
 
 
+@pytest.mark.parametrize("compression", COMPRESSIONS)
+def test_return_stats_schema_size_with_size_metadata(connection, tmp_path, compression):
+    path = str(tmp_path / "sizes.arrow")
+    query = QUERIES["strings"].replace("{rows}", "10000")
+    (row,) = copy_with_stats(connection, query, path, compression, ", SIZE_METADATA")
+    with open(path, 'rb') as f:
+        data = f.read()
+    schema_size = int(row["extra_info"]["schema_size_bytes"])
+    # The schema as it is on disk, after the totals are written into it
+    assert schema_size == schema_message_size(data, 8)
+    messages = ipc.MessageReader.open_stream(pa.py_buffer(data[8 + schema_size:]))
+    assert messages.read_next_message().type == "record batch"
+    # The totals take room in the schema, so it is larger than without them
+    (plain,) = copy_with_stats(connection, query, str(tmp_path / "plain.arrow"), compression)
+    assert schema_size > int(plain["extra_info"]["schema_size_bytes"])
+
+
 def test_return_stats_one_row_per_file(connection, tmp_path):
     directory = tmp_path / "parts"
     query = QUERIES["integers"].replace("{rows}", "10000")
@@ -153,6 +181,8 @@ def test_return_stats_one_row_per_file(connection, tmp_path):
     assert sum(row["count"] for row in rows) == 10000
     for row in rows:
         assert returned_stats(row) == expected_stats(row["filename"], False)
+    # Every file of one COPY starts with the same schema message
+    assert len({row["extra_info"]["schema_size_bytes"] for row in rows}) == 1
 
 
 def test_return_stats_stream_has_no_footer(connection, tmp_path):
@@ -163,3 +193,22 @@ def test_return_stats_stream_has_no_footer(connection, tmp_path):
     assert row["count"] == 1
     assert row["file_size_bytes"] == os.path.getsize(path)
     assert row["footer_size_bytes"] is None
+
+
+@pytest.mark.parametrize("compression", COMPRESSIONS)
+def test_return_stats_stream_schema_size(connection, tmp_path, compression):
+    path = str(tmp_path / "stream.arrows")
+    query = QUERIES["nested"].replace("{rows}", "10000")
+    options = "FORMAT ARROWS, CHUNK_SIZE 2048, RETURN_STATS"
+    if compression:
+        options += f", COMPRESSION '{compression}'"
+    connection.execute(f"COPY ({query}) TO '{path}' ({options})")
+    columns = [description[0] for description in connection.description]
+    (row,) = [dict(zip(columns, values)) for values in connection.fetchall()]
+    with open(path, 'rb') as f:
+        data = f.read()
+    schema_size = int(row["extra_info"]["schema_size_bytes"])
+    # A stream starts with the schema message
+    assert schema_size == schema_message_size(data, 0)
+    messages = ipc.MessageReader.open_stream(pa.py_buffer(data[schema_size:]))
+    assert messages.read_next_message().type == "record batch"

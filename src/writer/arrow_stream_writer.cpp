@@ -237,6 +237,8 @@ void ArrowStreamWriter::Finalize() {
         Value::UBIGINT(batch_stats.total_uncompressed_size);
     extra_info["peak_read_memory_bytes"] =
         Value::UBIGINT(ArrowBatchStatsPeakReadMemoryBytes(&batch_stats));
+    // Final even with SIZE_METADATA, which rewrites the schema at its reserved size
+    extra_info["schema_size_bytes"] = Value::UBIGINT(schema_message_size);
   }
 }
 
