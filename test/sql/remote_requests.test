@@ -37,9 +37,9 @@ SELECT max(COLUMNS(*)) FROM read_arrow('{DATA_PATH}/wide.arrow');
 ----
 1999999	999	100002	item_9999
 
-# The footer holds the schema, so the scan reads it and then each block once
+# The footer holds the schema, so the scan reads it and then each block in two pieces of 32 MB
 query I
-SELECT count(*) <= 3 FROM duckdb_logs_parsed('HTTP') WHERE request.type = 'GET';
+SELECT count(*) <= 5 FROM duckdb_logs_parsed('HTTP') WHERE request.type = 'GET';
 ----
 true
 

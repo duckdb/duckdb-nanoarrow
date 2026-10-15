@@ -22,6 +22,8 @@ constexpr double kMaxProjectedFraction = 0.8;
 constexpr idx_t kFooterReadBytes = 64 * 1024;
 //! A remote request costs a round trip, which is worth about this many bytes of transfer
 constexpr idx_t kRemoteCoalesceGapBytes = 1024 * 1024;
+//! One remote connection moves about 90 MB a second, so a larger read is cut into pieces
+constexpr idx_t kRemoteMaxReadBytes = 32 * 1024 * 1024;
 
 //! Makes the discovery decode take the uncompressed path, which only does arithmetic
 struct CodecOverride {
@@ -649,9 +651,13 @@ void IPCFileStreamReader::PlanProjectedBlock(const ArrowIpcFileBlock& block,
 
 void IPCFileStreamReader::ReadAll(const vector<FileRead>& reads) {
   // Local reads are cheap one after another, remote ones each wait a round trip
-  if (scheduler && reads.size() > 1) {
-    ReadConcurrently(*scheduler, *file_reader.handle, reads);
-    return;
+  if (scheduler) {
+    // A large body would download on one connection while the others sit idle
+    const auto pieces = SplitReads(reads, kRemoteMaxReadBytes);
+    if (pieces.size() > 1) {
+      ReadConcurrently(*scheduler, *file_reader.handle, pieces);
+      return;
+    }
   }
   for (const auto& read : reads) {
     ReadAt(*file_reader.handle, read);
