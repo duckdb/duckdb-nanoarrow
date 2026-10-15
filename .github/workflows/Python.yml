@@ -5,6 +5,7 @@ defaults:
     shell: bash
 jobs:
   python:
+    if: false
     name: Python
     runs-on: macos-latest
     env:

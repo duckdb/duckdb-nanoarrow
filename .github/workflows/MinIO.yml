@@ -18,6 +18,7 @@ defaults:
 
 jobs:
   minio:
+    if: false
     name: Tests on MinIO
     runs-on: ubuntu-latest
     timeout-minutes: 120

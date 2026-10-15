@@ -39,7 +39,7 @@ void DeduplicateChildNames(ArrowSchema& schema) {
 
 ArrowFileScan::ArrowFileScan(ClientContext& context, const OpenFileInfo& file)
     : BaseFileReader(file), scan_id(next_scan_id++) {
-  factory = make_uniq<FileIPCStreamFactory>(context, file);
+  factory = make_shared_ptr<FileIPCStreamFactory>(context, file);
 
   factory->InitReader();
   auto& reader = static_cast<IPCFileStreamReader&>(*factory->reader);
@@ -118,11 +118,33 @@ bool ArrowFileScan::TryInitializeScan(ClientContext& context,
   return true;
 }
 
+//! The scan factory of the blocks a local state claimed. The state owns the scan data
+//! that holds this factory, so the state outlives it
+class ArrowFileScan::BlockScanFactory : public ArrowScanFactory {
+ public:
+  BlockScanFactory(ArrowFileScan& scan, ArrowFileLocalState& lstate)
+      : scan(scan), lstate(lstate) {}
+
+  void GetSchema(ArrowSchema& schema) override {
+    NANOARROW_THROW_NOT_OK(ArrowSchemaDeepCopy(&scan.schema_root.arrow_schema, &schema));
+  }
+
+  unique_ptr<ArrowArrayStreamWrapper> ProduceStream(ArrowStreamParameters&) override {
+    // PrepareScan already gave the reader the projection these parameters carry
+    auto out = make_uniq<ArrowArrayStreamWrapper>();
+    IpcArrayStream(*lstate.block_reader).ToArrayStream(&out->arrow_array_stream);
+    return out;
+  }
+
+ private:
+  ArrowFileScan& scan;
+  ArrowFileLocalState& lstate;
+};
+
 void ArrowFileScan::InitializeScanData(ArrowFileLocalState& lstate,
-                                       stream_factory_produce_t producer,
-                                       uintptr_t producer_data) {
+                                       shared_ptr<ArrowScanFactory> producer) {
   lstate.local_arrow_function_data =
-      make_uniq<ArrowScanFunctionData>(producer, producer_data);
+      make_uniq<ArrowScanFunctionData>(std::move(producer));
   // A memberwise copy shares the release pointer, so a second scan would free it twice
   NANOARROW_THROW_NOT_OK(
       ArrowSchemaDeepCopy(&schema_root.arrow_schema,
@@ -150,15 +172,6 @@ void ArrowFileScan::StartScan(ClientContext& context, ArrowFileLocalState& lstat
       lstate.local_arrow_global_state.get());
 }
 
-unique_ptr<ArrowArrayStreamWrapper> ArrowFileScan::ProduceBlocks(
-    uintptr_t local_state, ArrowStreamParameters& parameters) {
-  // PrepareScan already gave the reader the projection these parameters carry
-  auto& lstate = *reinterpret_cast<ArrowFileLocalState*>(local_state);
-  auto out = make_uniq<ArrowArrayStreamWrapper>();
-  IpcArrayStream(*lstate.block_reader).ToArrayStream(&out->arrow_array_stream);
-  return out;
-}
-
 void ArrowFileScan::PrepareScan(ClientContext& context,
                                 GlobalTableFunctionState& gstate_p,
                                 LocalTableFunctionState& lstate_p) {
@@ -181,8 +194,7 @@ void ArrowFileScan::PrepareScan(ClientContext& context,
       lstate.count_reader = lstate.count_owned_reader.get();
       return;
     }
-    InitializeScanData(lstate, &FileIPCStreamFactory::Produce,
-                       reinterpret_cast<uintptr_t>(factory.get()));
+    InitializeScanData(lstate, factory);
     return;
   }
   // A state keeps its reader for the next claim of the same file
@@ -196,8 +208,7 @@ void ArrowFileScan::PrepareScan(ClientContext& context,
     // The schema comes from the footer copy, so a claim costs no read of the file start
     lstate.block_reader->LoadFooter(ArrowBufferView{
         {footer_window.get()}, static_cast<int64_t>(footer_window.GetSize())});
-    InitializeScanData(lstate, &ArrowFileScan::ProduceBlocks,
-                       reinterpret_cast<uintptr_t>(&lstate));
+    InitializeScanData(lstate, make_shared_ptr<BlockScanFactory>(*this, lstate));
     // The fetch needs the projection before the scan that would push it starts
     if (!count_only) {
       vector<idx_t> projection;

@@ -13,14 +13,15 @@
 
 namespace duckdb {
 namespace ext_nanoarrow {
-//! Our FunctionData is the same as the ArrowScanFunctionData except we extend it
-//! to keep the ArrowIpcArrowArrayStreamFactory alive.
+//! Our FunctionData is the same as the ArrowScanFunctionData, which keeps the
+//! ArrowIPCStreamFactory alive, with typed access to it
 struct ArrowIPCFunctionData : public ArrowScanFunctionData {
-  explicit ArrowIPCFunctionData(std::unique_ptr<ArrowIPCStreamFactory> factory)
-      : ArrowScanFunctionData(ArrowIPCStreamFactory::Produce,
-                              reinterpret_cast<uintptr_t>(factory.get())),
-        factory(std::move(factory)) {}
-  std::unique_ptr<ArrowIPCStreamFactory> factory;
+  explicit ArrowIPCFunctionData(shared_ptr<ArrowIPCStreamFactory> factory)
+      : ArrowScanFunctionData(std::move(factory)) {}
+
+  ArrowIPCStreamFactory& IPCFactory() const {
+    return factory->Cast<ArrowIPCStreamFactory>();
+  }
 };
 }  // namespace ext_nanoarrow
 }  // namespace duckdb

@@ -176,8 +176,10 @@ TableFunction ToArrowIPCFunction::GetFunction() {
                     InitLocal);
   fun.in_out_function = Function;
   fun.in_out_function_final = FunctionFinal;
-  fun.named_parameters["compression"] = LogicalType::VARCHAR;
-  fun.named_parameters["compression_level"] = LogicalType::BIGINT;
+  fun.GetSignature().WithTypedKwargs("options", [](TypedKwargs& options) {
+    options.Add("compression", LogicalType::VARCHAR)
+        .Add("compression_level", LogicalType::BIGINT);
+  });
   return fun;
 }
 

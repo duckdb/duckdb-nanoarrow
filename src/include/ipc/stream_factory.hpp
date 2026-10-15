@@ -19,20 +19,18 @@ namespace ext_nanoarrow {
 
 class IPCFileStreamReader;
 
-class ArrowStreamFactory {
-  ArrowStreamFactory() {};
-};
-//! This Factory is a type invented by DuckDB. Notably, the Produce()
-//! function pointer is passed to the constructor of the ArrowScanFunctionData
-//! constructor (which we wrap).
-class ArrowIPCStreamFactory {
+//! The scan factory arrow_scan takes as bind input: it produces the schema and the
+//! array stream of an IPC stream through its reader
+class ArrowIPCStreamFactory : public ArrowScanFactory {
  public:
-  virtual ~ArrowIPCStreamFactory() = default;
+  ~ArrowIPCStreamFactory() override = default;
   explicit ArrowIPCStreamFactory(Allocator& allocator);
 
-  //! Called once when initializing Scan States
-  static unique_ptr<ArrowArrayStreamWrapper> Produce(uintptr_t factory_ptr,
-                                                     ArrowStreamParameters& parameters);
+  //! The schema of the arrow object, as a fresh copy the caller releases
+  void GetSchema(ArrowSchema& schema) override;
+  //! Called once when initializing Scan States, moves the reader into the stream
+  unique_ptr<ArrowArrayStreamWrapper> ProduceStream(
+      ArrowStreamParameters& parameters) override;
   //! The projected top level columns in output order, empty when nothing is projected
   static vector<idx_t> ProjectedColumnIndexes(const ArrowStreamParameters& parameters);
 

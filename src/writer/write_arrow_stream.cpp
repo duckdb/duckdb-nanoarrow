@@ -235,9 +235,10 @@ CopyFunctionExecutionMode ArrowWriteExecutionMode(bool preserve_insertion_order,
   return CopyFunctionExecutionMode::REGULAR_COPY_TO_FILE;
 }
 
-idx_t ArrowWriteDesiredBatchSize(ClientContext& context, FunctionData& bind_data_p) {
+optional_idx ArrowWriteDesiredBatchSize(ClientContext& context,
+                                        FunctionData& bind_data_p) {
   auto& bind_data = bind_data_p.Cast<ArrowWriteBindData>();
-  return bind_data.row_group_size;
+  return optional_idx(bind_data.row_group_size);
 }
 
 idx_t ArrowWriteFileSizeBytes(GlobalFunctionData& gstate) {

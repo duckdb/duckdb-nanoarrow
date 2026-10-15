@@ -34,6 +34,8 @@ import org.junit.jupiter.params.provider.MethodSource;
  */
 class PeakReadMemoryTest {
 	private static final Path SHELL = Path.of(System.getProperty("duckdb.shell", "../../build/release/duckdb"));
+	private static final Path EXTENSION = Path.of(
+	    System.getProperty("duckdb.extension", "../../build/release/extension/nanoarrow/nanoarrow.duckdb_extension"));
 
 	// Cover fixed width, variable width, nested, and columns without nulls, whose validity bitmap the writer leaves
 	// out but arrow-java allocates
@@ -154,9 +156,10 @@ class PeakReadMemoryTest {
 		           "reading took " + peak + " bytes, more than the peak_read_memory_bytes of " + peakReadMemory);
 	}
 
-	/** Runs one statement in the duckdb shell built with the extension and returns its single CSV row */
+	/** Runs one statement in the duckdb shell, with the unsigned extension build loaded, and returns its single CSV row */
 	private static String duckdb(String sql) throws IOException, InterruptedException {
-		Process process = new ProcessBuilder(SHELL.toString(), "-csv", "-noheader", "-bail", "-c", sql)
+		Process process = new ProcessBuilder(SHELL.toString(), "-unsigned", "-csv", "-noheader", "-bail", "-cmd",
+		                                     "LOAD '" + EXTENSION.toAbsolutePath() + "'", "-c", sql)
 		                      .redirectErrorStream(true)
 		                      .start();
 		String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();

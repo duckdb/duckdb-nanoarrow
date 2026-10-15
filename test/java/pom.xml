@@ -17,6 +17,7 @@
     <arrow.version>16.1.0</arrow.version>
     <junit.version>5.10.2</junit.version>
     <duckdb.shell>${project.basedir}/../../build/release/duckdb</duckdb.shell>
+    <duckdb.extension>${project.basedir}/../../build/release/extension/nanoarrow/nanoarrow.duckdb_extension</duckdb.extension>
   </properties>
 
   <dependencies>
@@ -69,6 +70,7 @@
           <argLine>--add-opens=java.base/java.nio=ALL-UNNAMED</argLine>
           <systemPropertyVariables>
             <duckdb.shell>${duckdb.shell}</duckdb.shell>
+            <duckdb.extension>${duckdb.extension}</duckdb.extension>
           </systemPropertyVariables>
         </configuration>
       </plugin>

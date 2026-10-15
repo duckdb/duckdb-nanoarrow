@@ -11,18 +11,26 @@ fetchcontent_declare(nanoarrow
                      URL "https://github.com/apache/arrow-nanoarrow/archive/665794510011c07d4a6932b248608c2c02113796.zip"
                      URL_HASH SHA256=a81178c68929c74e97cff6b02f9a9f77fc656966ad7dbc4ae858cb45496d6b6f
 )
-# nanoarrow compresses and decompresses itself with liblz4 and libzstd, from vcpkg in CI
-set(NANOARROW_IPC_WITH_ZSTD ON)
-# DuckDB's bundled zstd is namespaced C++ that nanoarrow's C sources cannot link against
-find_path(ZSTD_INCLUDE_DIR zstd.h REQUIRED)
-# nanoarrow looks lz4 up through pkgconfig unless these variables are set
-find_path(LZ4_INCLUDE_DIR lz4frame.h REQUIRED)
-find_library(LZ4_LIBRARY NAMES lz4 liblz4 REQUIRED)
-get_filename_component(LZ4_LIBRARY_DIR "${LZ4_LIBRARY}" DIRECTORY)
-set(NANOARROW_IPC_WITH_LZ4 ON)
-set(LZ4_INCLUDE_DIRS "${LZ4_INCLUDE_DIR}")
-set(LZ4_LIBRARY_DIRS "${LZ4_LIBRARY_DIR}")
-set(LZ4_LIBRARIES "${LZ4_LIBRARY}")
+# nanoarrow compresses and decompresses itself with liblz4 and libzstd, from vcpkg in CI.
+# Builds without vcpkg, such as DuckDB-Wasm, can opt out of the codecs: compressed IPC
+# bodies are then rejected when read and never written
+option(NANOARROW_IPC_COMPRESSION "Read and write zstd and lz4 compressed IPC bodies" ON)
+if(NANOARROW_IPC_COMPRESSION)
+  set(NANOARROW_IPC_WITH_ZSTD ON)
+  # DuckDB's bundled zstd is namespaced C++ that nanoarrow's C sources cannot link against
+  find_path(ZSTD_INCLUDE_DIR zstd.h REQUIRED)
+  # nanoarrow looks lz4 up through pkgconfig unless these variables are set
+  find_path(LZ4_INCLUDE_DIR lz4frame.h REQUIRED)
+  find_library(LZ4_LIBRARY NAMES lz4 liblz4 REQUIRED)
+  get_filename_component(LZ4_LIBRARY_DIR "${LZ4_LIBRARY}" DIRECTORY)
+  set(NANOARROW_IPC_WITH_LZ4 ON)
+  set(LZ4_INCLUDE_DIRS "${LZ4_INCLUDE_DIR}")
+  set(LZ4_LIBRARY_DIRS "${LZ4_LIBRARY_DIR}")
+  set(LZ4_LIBRARIES "${LZ4_LIBRARY}")
+else()
+  set(NANOARROW_IPC_WITH_ZSTD OFF)
+  set(NANOARROW_IPC_WITH_LZ4 OFF)
+endif()
 # DuckDB instruments only its C++ flags, so nanoarrow's C sources take the same sanitizer
 if(ENABLE_THREAD_SANITIZER)
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=thread")

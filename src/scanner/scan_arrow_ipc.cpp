@@ -31,10 +31,10 @@ struct ScanArrowIPCFunction : ArrowTableFunction {
       buffers.emplace_back(unpacked[0].GetPointer(), unpacked[1].GetValue<uint64_t>());
     }
 
-    auto stream_factory = make_uniq<BufferIPCStreamFactory>(context, buffers);
+    auto stream_factory = make_shared_ptr<BufferIPCStreamFactory>(context, buffers);
     auto res = make_uniq<ArrowIPCFunctionData>(std::move(stream_factory));
-    res->factory->InitReader();
-    res->factory->GetFileSchema(res->schema_root);
+    res->IPCFactory().InitReader();
+    res->IPCFactory().GetFileSchema(res->schema_root);
 
     PopulateArrowTableSchema(context, res->arrow_table, res->schema_root.arrow_schema);
     names = StringsToIdentifiers(res->arrow_table.GetNames());

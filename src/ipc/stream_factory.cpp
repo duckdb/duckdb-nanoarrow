@@ -12,23 +12,28 @@ namespace ext_nanoarrow {
 ArrowIPCStreamFactory::ArrowIPCStreamFactory(Allocator& allocator_p)
     : allocator(allocator_p) {}
 
-unique_ptr<ArrowArrayStreamWrapper> ArrowIPCStreamFactory::Produce(
-    uintptr_t factory_ptr, ArrowStreamParameters& parameters) {
-  auto factory =
-      static_cast<ArrowIPCStreamFactory*>(reinterpret_cast<void*>(factory_ptr));
-
-  if (!factory->reader) {
+unique_ptr<ArrowArrayStreamWrapper> ArrowIPCStreamFactory::ProduceStream(
+    ArrowStreamParameters& parameters) {
+  if (!reader) {
     throw InternalException("IpcStreamReader was not initialized or was already moved");
   }
 
   const auto column_indexes = ProjectedColumnIndexes(parameters);
   if (!column_indexes.empty()) {
-    factory->reader->SetColumnProjection(column_indexes);
+    reader->SetColumnProjection(column_indexes);
   }
 
   auto out = make_uniq<ArrowArrayStreamWrapper>();
-  IpcArrayStream(std::move(factory->reader)).ToArrayStream(&out->arrow_array_stream);
+  IpcArrayStream(std::move(reader)).ToArrayStream(&out->arrow_array_stream);
   return out;
+}
+
+void ArrowIPCStreamFactory::GetSchema(ArrowSchema& schema) {
+  ArrowSchemaWrapper wrapper;
+  GetFileSchema(wrapper);
+  // Hand the copy over to the caller
+  schema = wrapper.arrow_schema;
+  wrapper.arrow_schema.release = nullptr;
 }
 
 vector<idx_t> ArrowIPCStreamFactory::ProjectedColumnIndexes(
