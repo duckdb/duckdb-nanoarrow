@@ -1,0 +1,333 @@
+# name: test/sql/dictionary_encode.test
+# description: DICTIONARY_ENCODE writes columns of Arrow IPC streams dictionary encoded
+# group: [sql]
+
+require nanoarrow
+
+test-env DATA_PATH {TEST_DIR}
+
+statement ok
+CREATE TYPE mood AS ENUM ('happy', 'sad', 'ok');
+
+# Every dictionary encodable physical type, NULLs, values whose bytes differ but compare
+# equal, a column without values, and dictionaries that change from batch to batch
+statement ok
+CREATE TABLE t AS SELECT i,
+  CASE WHEN i % 13 = 0 THEN NULL ELSE 'v' || ((i // 1000) % 50 + i % 7)::VARCHAR END AS s,
+  'const' AS c,
+  CASE i % 4 WHEN 0 THEN '-0.0'::DOUBLE WHEN 1 THEN 0.0 WHEN 2 THEN 'nan'::DOUBLE ELSE 1.5 END AS d,
+  (i % 3)::DECIMAL(18,3) AS dec,
+  DATE '2024-01-01' + (i % 10)::INTEGER AS dt,
+  i % 2 = 0 AS b,
+  ('x' || (i % 4))::BLOB AS bl,
+  (i % 3)::HUGEINT AS h,
+  (i % 3)::UHUGEINT AS uh,
+  TO_DAYS((i % 3)::INTEGER) AS iv,
+  NULL::VARCHAR AS alln,
+  repeat('long string value ', 3) || (i % 20) AS longs,
+  (['happy', 'sad', 'ok'])[(i % 3) + 1]::mood AS m,
+  (i % 5)::REAL AS r,
+  TIMESTAMP '2024-01-01' + TO_SECONDS(i % 9) AS ts,
+  (i % 3)::UTINYINT AS ut
+FROM range(30000) t(i);
+
+statement ok
+COPY t TO '{DATA_PATH}/plain.arrows' (FORMAT ARROWS, CHUNK_SIZE 2048);
+
+statement ok
+COPY t TO '{DATA_PATH}/dict.arrows' (DICTIONARY_ENCODE ('s', 'c', 'd', 'dec', 'dt', 'b', 'bl', 'h', 'uh', 'iv', 'alln', 'longs', 'm', 'r', 'ts', 'ut'), CHUNK_SIZE 2048);
+
+query II
+SELECT count(*), (SELECT count(*) FROM (FROM t EXCEPT ALL FROM read_arrow('{DATA_PATH}/dict.arrows'))) FROM read_arrow('{DATA_PATH}/dict.arrows');
+----
+30000	0
+
+query I
+SELECT count(*) FROM (FROM read_arrow('{DATA_PATH}/dict.arrows') EXCEPT ALL FROM t);
+----
+0
+
+# The rows keep their order
+query I
+SELECT count(*) FROM (SELECT i, row_number() OVER () - 1 AS position FROM read_arrow('{DATA_PATH}/dict.arrows')) WHERE i <> position;
+----
+0
+
+# -0.0 and 0.0 are distinct dictionary values, so each keeps its sign
+query I
+SELECT count(*) FROM read_arrow('{DATA_PATH}/dict.arrows') WHERE d::VARCHAR = '-0.0';
+----
+7500
+
+# The dictionary values convert as the columns do when written plain
+query I
+SELECT (SELECT string_agg(column_type, ',') FROM (DESCRIBE FROM read_arrow('{DATA_PATH}/dict.arrows'))) = (SELECT string_agg(column_type, ',') FROM (DESCRIBE FROM read_arrow('{DATA_PATH}/plain.arrows')));
+----
+true
+
+# The option takes column names as strings, identifiers or a list
+statement ok
+COPY (SELECT i, (i % 3)::VARCHAR AS s FROM range(10) t(i)) TO '{DATA_PATH}/forms.arrows' (DICTIONARY_ENCODE 's');
+
+statement ok
+COPY (SELECT i, (i % 3)::VARCHAR AS s FROM range(10) t(i)) TO '{DATA_PATH}/forms.arrows' (DICTIONARY_ENCODE ['s', 'i']);
+
+query II
+SELECT sum(i), string_agg(s, '') FROM read_arrow('{DATA_PATH}/forms.arrows');
+----
+45	0120120120
+
+# Compressed bodies, dictionary batches included
+foreach codec zstd lz4
+
+statement ok
+COPY t TO '{DATA_PATH}/dict_{codec}.arrows' (DICTIONARY_ENCODE ('s', 'c', 'longs', 'd'), CHUNK_SIZE 2048, COMPRESSION {codec});
+
+query I
+SELECT count(*) FROM (FROM t EXCEPT ALL FROM read_arrow('{DATA_PATH}/dict_{codec}.arrows'));
+----
+0
+
+endloop
+
+# Batches flushed out of order by several threads each carry their dictionaries
+statement ok
+SET threads = 8;
+
+statement ok
+SET preserve_insertion_order = false;
+
+statement ok
+COPY t TO '{DATA_PATH}/dict_parallel.arrows' (DICTIONARY_ENCODE ('s', 'longs', 'c'), CHUNK_SIZE 1024);
+
+query II
+SELECT count(*), (SELECT count(*) FROM (FROM t EXCEPT ALL FROM read_arrow('{DATA_PATH}/dict_parallel.arrows'))) FROM read_arrow('{DATA_PATH}/dict_parallel.arrows');
+----
+30000	0
+
+statement ok
+RESET preserve_insertion_order;
+
+# A dictionary repeated by the next batch is written once, so the stream of a constant
+# column is smaller than its record batches would be with a dictionary each
+statement ok
+COPY (SELECT 'the same long value for every row of the stream' AS s FROM range(100000)) TO '{DATA_PATH}/constant.arrows' (DICTIONARY_ENCODE ('s'), CHUNK_SIZE 2048);
+
+query II
+SELECT count(*), count(DISTINCT s) FROM read_arrow('{DATA_PATH}/constant.arrows');
+----
+100000	1
+
+query I
+SELECT size < 100000 * 4 + 50 * 2048 FROM read_blob('{DATA_PATH}/constant.arrows');
+----
+true
+
+# No rows, and a column with only NULLs
+statement ok
+COPY (SELECT 'x' AS s, NULL::INTEGER AS n WHERE false) TO '{DATA_PATH}/empty.arrows' (DICTIONARY_ENCODE ('s', 'n'));
+
+query I
+SELECT count(*) FROM read_arrow('{DATA_PATH}/empty.arrows');
+----
+0
+
+statement ok
+COPY (SELECT NULL::INTEGER AS n FROM range(3000)) TO '{DATA_PATH}/nulls.arrows' (DICTIONARY_ENCODE ('n'));
+
+query II
+SELECT count(*), count(n) FROM read_arrow('{DATA_PATH}/nulls.arrows');
+----
+3000	0
+
+# Dictionary vectors scanned from compressed storage, which to_arrow_ipc receives as they are
+statement ok
+ATTACH '{DATA_PATH}/dictionary_store.db' AS store;
+
+statement ok
+CREATE OR REPLACE TABLE store.t AS SELECT i, 'value ' || (i % 10)::VARCHAR AS s, CASE WHEN i % 11 = 0 THEN NULL ELSE 'other ' || (i % 3)::VARCHAR END AS o FROM range(100000) t(i);
+
+statement ok
+CHECKPOINT store;
+
+query I
+SELECT count(*) > 0 FROM store.t WHERE vector_type(s) = 'DICTIONARY_VECTOR';
+----
+true
+
+statement ok
+COPY (FROM store.t) TO '{DATA_PATH}/store.arrows' (DICTIONARY_ENCODE ('s', 'o'));
+
+query I
+SELECT count(*) FROM (FROM store.t EXCEPT ALL FROM read_arrow('{DATA_PATH}/store.arrows'));
+----
+0
+
+# A to_arrow_ipc row holds a record batch with its dictionaries, so the rows concatenate
+# into a stream in any order after the schema
+statement ok
+COPY (
+  SELECT list_reduce(list(ipc ORDER BY NOT header), lambda a, b: a || b) || '\xFF\xFF\xFF\xFF\x00\x00\x00\x00'::BLOB
+  FROM to_arrow_ipc((FROM store.t), dictionary_encode := ['s', 'o'], compression := 'zstd')
+) TO '{DATA_PATH}/to_arrow_ipc.arrows' (FORMAT BLOB);
+
+query II
+SELECT count(*), (SELECT count(*) FROM (FROM store.t EXCEPT ALL FROM read_arrow('{DATA_PATH}/to_arrow_ipc.arrows'))) FROM read_arrow('{DATA_PATH}/to_arrow_ipc.arrows');
+----
+100000	0
+
+statement ok
+DETACH store;
+
+# ENUM columns are dictionary encoded already, naming one changes nothing
+statement ok
+COPY (SELECT 'sad'::mood AS m, [{'m': 'happy'::mood}, NULL] AS nested) TO '{DATA_PATH}/enum.arrows' (DICTIONARY_ENCODE ('m'));
+
+query II
+FROM read_arrow('{DATA_PATH}/enum.arrows');
+----
+sad	[{'m': happy}, NULL]
+
+# Dictionary ids follow the schema depth first, so distinct dictionaries of nested ENUMs
+# and encoded columns each reach their field
+statement ok
+CREATE TYPE color AS ENUM ('red', 'green', 'blue');
+
+statement ok
+COPY (
+  SELECT {'c': (['red', 'green', 'blue'])[(i % 3) + 1]::color} AS st,
+         'w' || (i % 4)::VARCHAR AS s,
+         [(['happy', 'sad', 'ok'])[(i % 3) + 1]::mood] AS l,
+         (i % 5)::INTEGER AS n
+  FROM range(5000) t(i)
+) TO '{DATA_PATH}/order.arrows' (DICTIONARY_ENCODE ('s', 'n'), CHUNK_SIZE 2048);
+
+query IIII
+SELECT count(DISTINCT st.c), string_agg(DISTINCT s, ',' ORDER BY s), count(DISTINCT l[1]), sum(n) FROM read_arrow('{DATA_PATH}/order.arrows');
+----
+3	w0,w1,w2,w3	3	10000
+
+query I
+SELECT count(*) FROM (SELECT st, l, row_number() OVER () - 1 AS i FROM read_arrow('{DATA_PATH}/order.arrows')) WHERE st.c <> (['red', 'green', 'blue'])[(i % 3) + 1] OR l[1] <> (['happy', 'sad', 'ok'])[(i % 3) + 1];
+----
+0
+
+# Every file of a rotated, partitioned or per thread COPY writes its own dictionaries
+statement ok
+COPY t TO '{DATA_PATH}/dict_rotated' (FORMAT ARROWS, DICTIONARY_ENCODE ('s', 'c'), ROW_GROUP_SIZE 2048, ROW_GROUPS_PER_FILE 2);
+
+statement ok
+COPY t TO '{DATA_PATH}/dict_sized' (FORMAT ARROWS, DICTIONARY_ENCODE ('s', 'longs'), ROW_GROUP_SIZE 2048, FILE_SIZE_BYTES 100000);
+
+statement ok
+COPY (SELECT *, i % 3 AS p FROM t) TO '{DATA_PATH}/dict_partitioned' (FORMAT ARROWS, DICTIONARY_ENCODE ('s', 'c'), PARTITION_BY (p));
+
+statement ok
+COPY t TO '{DATA_PATH}/dict_per_thread' (FORMAT ARROWS, DICTIONARY_ENCODE ('s', 'c'), PER_THREAD_OUTPUT);
+
+foreach output dict_rotated dict_sized dict_partitioned
+
+query II
+SELECT count(*) > 1, sum(count) FROM (SELECT filename, count(*) AS count FROM read_arrow('{DATA_PATH}/{output}/**/*.arrows', filename = true) GROUP BY filename);
+----
+true	30000
+
+endloop
+
+foreach output dict_rotated dict_sized dict_partitioned dict_per_thread
+
+query I
+SELECT count(*) FROM (SELECT i, s, c FROM t EXCEPT ALL SELECT i, s, c FROM read_arrow('{DATA_PATH}/{output}/**/*.arrows'));
+----
+0
+
+endloop
+
+# A partition column is not among the written columns
+statement error
+COPY (SELECT *, i % 3 AS p FROM t) TO '{DATA_PATH}/dict_partition_column' (FORMAT ARROWS, DICTIONARY_ENCODE ('p'), PARTITION_BY (p));
+----
+Column "p" in DICTIONARY_ENCODE is not among the written columns
+
+# Dictionaries of large strings
+statement ok
+SET arrow_large_buffer_size = true;
+
+statement ok
+COPY t TO '{DATA_PATH}/dict_large.arrows' (DICTIONARY_ENCODE ('s', 'longs'), CHUNK_SIZE 2048);
+
+statement ok
+RESET arrow_large_buffer_size;
+
+query I
+SELECT count(*) FROM (FROM t EXCEPT ALL FROM read_arrow('{DATA_PATH}/dict_large.arrows'));
+----
+0
+
+# Field metadata and type metadata describe the encoded field
+statement ok
+COPY (SELECT 'x' || (i % 3)::VARCHAR AS s FROM range(10) t(i)) TO '{DATA_PATH}/dict_metadata.arrows' (DICTIONARY_ENCODE ('s'), FIELD_METADATA {'s': {'role': 'code'}}, TYPE_METADATA_NAMESPACE 'VENDOR');
+
+query III
+SELECT field_path, key, value FROM arrow_kv_metadata('{DATA_PATH}/dict_metadata.arrows') WHERE field_path IS NOT NULL ORDER BY key;
+----
+[s]	VENDOR:type	VARCHAR
+[s]	VENDOR:type_details	VARCHAR
+[s]	role	code
+
+# RETURN_STATS bounds the memory of record batches only, a reader also holds dictionaries
+statement ok
+CREATE TABLE dictionary_stats AS WITH s AS (COPY t TO '{DATA_PATH}/stats.arrows' (DICTIONARY_ENCODE ('s'), CHUNK_SIZE 2048, RETURN_STATS)) SELECT * FROM s
+
+query III
+SELECT count, extra_info['record_batch_count']::UBIGINT, extra_info['peak_read_memory_bytes'] IS NULL FROM dictionary_stats
+----
+30000	15	true
+
+# Errors
+statement error
+COPY t TO '{DATA_PATH}/dict.arrow' (DICTIONARY_ENCODE ('s'));
+----
+DICTIONARY_ENCODE requires the Arrow IPC stream format
+
+statement error
+COPY t TO '{DATA_PATH}/dict.arrows' (DICTIONARY_ENCODE ('missing'));
+----
+Column "missing" in DICTIONARY_ENCODE is not among the written columns
+
+statement error
+COPY t TO '{DATA_PATH}/dict.arrows' (DICTIONARY_ENCODE ('s', 's'));
+----
+Column "s" is named more than once in DICTIONARY_ENCODE
+
+statement error
+COPY t TO '{DATA_PATH}/dict.arrows' (DICTIONARY_ENCODE []);
+----
+DICTIONARY_ENCODE requires at least one column name
+
+statement error
+COPY (SELECT [1] AS l) TO '{DATA_PATH}/dict.arrows' (DICTIONARY_ENCODE ('l'));
+----
+DICTIONARY_ENCODE does not support column "l" of type INTEGER[]
+
+statement error
+COPY (SELECT '01:00:00+01'::TIMETZ AS tz) TO '{DATA_PATH}/dict.arrows' (DICTIONARY_ENCODE ('tz'));
+----
+whose Arrow conversion drops the time zone offset
+
+statement error
+FROM to_arrow_ipc((SELECT 1 AS a), dictionary_encode := ['b']);
+----
+Column "b" in DICTIONARY_ENCODE is not among the written columns
+
+# An Arrow extension type would be lost, readers resolve a dictionary from its values
+statement ok
+SET arrow_lossless_conversion = true;
+
+statement error
+COPY (SELECT uuid() AS u) TO '{DATA_PATH}/dict.arrows' (DICTIONARY_ENCODE ('u'));
+----
+which is written as the Arrow extension type arrow.uuid
+
+statement ok
+RESET arrow_lossless_conversion;

@@ -98,9 +98,9 @@ unique_ptr<FunctionData> ArrowWriteBind(ClientContext& context,
   D_ASSERT(names.size() == sql_types.size());
   auto bind_data = make_uniq<ArrowWriteBindData>();
   bind_data->options = context.GetClientProperties();
-  bind_data->schema = CreateArrowIpcSchema(sql_types, names, bind_data->options);
   // Arrow recommends .arrow for the file format and .arrows for the stream
   bind_data->file_format = !StringUtil::CIEquals(input.info.format, "arrows");
+  vector<idx_t> dictionary_columns;
 
   for (auto& option : input.info.options) {
     const auto loption = StringUtil::Lower(option.first.GetIdentifierName());
@@ -111,6 +111,10 @@ unique_ptr<FunctionData> ArrowWriteBind(ClientContext& context,
       bind_data->size_metadata =
           option.second.empty() ||
           BooleanValue::Get(option.second[0].DefaultCastAs(LogicalType::BOOLEAN));
+      continue;
+    }
+    if (loption == "dictionary_encode") {
+      dictionary_columns = ReadDictionaryColumns(option.second, names);
       continue;
     }
     if (option.second.size() != 1) {
@@ -148,6 +152,8 @@ unique_ptr<FunctionData> ArrowWriteBind(ClientContext& context,
     }
   }
   bind_data->compression.Validate();
+  bind_data->schema = CreateArrowIpcSchema(sql_types, names, bind_data->options,
+                                           dictionary_columns, !bind_data->file_format);
   if (!bind_data->type_metadata_namespace.empty()) {
     const auto& type_metadata_namespace = bind_data->type_metadata_namespace;
     for (const auto& field : bind_data->field_metadata) {

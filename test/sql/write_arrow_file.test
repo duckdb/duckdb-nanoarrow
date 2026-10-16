@@ -45,7 +45,7 @@ SELECT (SELECT count(*) > 1 FROM glob('{DATA_PATH}/rotate/*.arrow')), count(*), 
 ----
 true	100000	0
 
-# ENUM output requires dictionary messages
+# The file format does not write dictionary messages, streams do
 statement ok
 CREATE TYPE mood AS ENUM ('happy', 'sad');
 
@@ -58,11 +58,6 @@ statement error
 COPY (SELECT [{'m': 'happy'::mood}] AS nested) TO '{DATA_PATH}/enum.arrow';
 ----
 column "nested"
-
-statement error
-FROM to_arrow_ipc((SELECT 'happy'::mood AS m));
-----
-Not implemented Error: Arrow IPC output does not support ENUM values in column "m"
 
 # The bind error leaves the database usable
 query I
