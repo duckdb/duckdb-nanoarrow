@@ -188,6 +188,93 @@ FROM read_arrow('{DATA_PATH}/enum.arrows');
 ----
 sad	[{'m': happy}, NULL]
 
+# Dictionary ids follow the schema depth first, so distinct dictionaries of nested ENUMs
+# and encoded columns each reach their field
+statement ok
+CREATE TYPE color AS ENUM ('red', 'green', 'blue');
+
+statement ok
+COPY (
+  SELECT {'c': (['red', 'green', 'blue'])[(i % 3) + 1]::color} AS st,
+         'w' || (i % 4)::VARCHAR AS s,
+         [(['happy', 'sad', 'ok'])[(i % 3) + 1]::mood] AS l,
+         (i % 5)::INTEGER AS n
+  FROM range(5000) t(i)
+) TO '{DATA_PATH}/order.arrows' (DICTIONARY_ENCODE ('s', 'n'), CHUNK_SIZE 2048);
+
+query IIII
+SELECT count(DISTINCT st.c), string_agg(DISTINCT s, ',' ORDER BY s), count(DISTINCT l[1]), sum(n) FROM read_arrow('{DATA_PATH}/order.arrows');
+----
+3	w0,w1,w2,w3	3	10000
+
+query I
+SELECT count(*) FROM (SELECT st, l, row_number() OVER () - 1 AS i FROM read_arrow('{DATA_PATH}/order.arrows')) WHERE st.c <> (['red', 'green', 'blue'])[(i % 3) + 1] OR l[1] <> (['happy', 'sad', 'ok'])[(i % 3) + 1];
+----
+0
+
+# Every file of a rotated, partitioned or per thread COPY writes its own dictionaries
+statement ok
+COPY t TO '{DATA_PATH}/dict_rotated' (FORMAT ARROWS, DICTIONARY_ENCODE ('s', 'c'), ROW_GROUP_SIZE 2048, ROW_GROUPS_PER_FILE 2);
+
+statement ok
+COPY t TO '{DATA_PATH}/dict_sized' (FORMAT ARROWS, DICTIONARY_ENCODE ('s', 'longs'), ROW_GROUP_SIZE 2048, FILE_SIZE_BYTES 100000);
+
+statement ok
+COPY (SELECT *, i % 3 AS p FROM t) TO '{DATA_PATH}/dict_partitioned' (FORMAT ARROWS, DICTIONARY_ENCODE ('s', 'c'), PARTITION_BY (p));
+
+statement ok
+COPY t TO '{DATA_PATH}/dict_per_thread' (FORMAT ARROWS, DICTIONARY_ENCODE ('s', 'c'), PER_THREAD_OUTPUT);
+
+foreach output dict_rotated dict_sized dict_partitioned
+
+query II
+SELECT count(*) > 1, sum(count) FROM (SELECT filename, count(*) AS count FROM read_arrow('{DATA_PATH}/{output}/**/*.arrows', filename = true) GROUP BY filename);
+----
+true	30000
+
+endloop
+
+foreach output dict_rotated dict_sized dict_partitioned dict_per_thread
+
+query I
+SELECT count(*) FROM (SELECT i, s, c FROM t EXCEPT ALL SELECT i, s, c FROM read_arrow('{DATA_PATH}/{output}/**/*.arrows'));
+----
+0
+
+endloop
+
+# A partition column is not among the written columns
+statement error
+COPY (SELECT *, i % 3 AS p FROM t) TO '{DATA_PATH}/dict_partition_column' (FORMAT ARROWS, DICTIONARY_ENCODE ('p'), PARTITION_BY (p));
+----
+Column "p" in DICTIONARY_ENCODE is not among the written columns
+
+# Dictionaries of large strings
+statement ok
+SET arrow_large_buffer_size = true;
+
+statement ok
+COPY t TO '{DATA_PATH}/dict_large.arrows' (DICTIONARY_ENCODE ('s', 'longs'), CHUNK_SIZE 2048);
+
+statement ok
+RESET arrow_large_buffer_size;
+
+query I
+SELECT count(*) FROM (FROM t EXCEPT ALL FROM read_arrow('{DATA_PATH}/dict_large.arrows'));
+----
+0
+
+# Field metadata and type metadata describe the encoded field
+statement ok
+COPY (SELECT 'x' || (i % 3)::VARCHAR AS s FROM range(10) t(i)) TO '{DATA_PATH}/dict_metadata.arrows' (DICTIONARY_ENCODE ('s'), FIELD_METADATA {'s': {'role': 'code'}}, TYPE_METADATA_NAMESPACE 'VENDOR');
+
+query III
+SELECT field_path, key, value FROM arrow_kv_metadata('{DATA_PATH}/dict_metadata.arrows') WHERE field_path IS NOT NULL ORDER BY key;
+----
+[s]	VENDOR:type	VARCHAR
+[s]	VENDOR:type_details	VARCHAR
+[s]	role	code
+
 # RETURN_STATS bounds the memory of record batches only, a reader also holds dictionaries
 statement ok
 CREATE TABLE dictionary_stats AS WITH s AS (COPY t TO '{DATA_PATH}/stats.arrows' (DICTIONARY_ENCODE ('s'), CHUNK_SIZE 2048, RETURN_STATS)) SELECT * FROM s
@@ -222,6 +309,11 @@ statement error
 COPY (SELECT [1] AS l) TO '{DATA_PATH}/dict.arrows' (DICTIONARY_ENCODE ('l'));
 ----
 DICTIONARY_ENCODE does not support column "l" of type INTEGER[]
+
+statement error
+COPY (SELECT '01:00:00+01'::TIMETZ AS tz) TO '{DATA_PATH}/dict.arrows' (DICTIONARY_ENCODE ('tz'));
+----
+whose Arrow conversion drops the time zone offset
 
 statement error
 FROM to_arrow_ipc((SELECT 1 AS a), dictionary_encode := ['b']);

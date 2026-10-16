@@ -58,10 +58,14 @@ class TypedDictionaryBuilder final : public ArrowDictionaryBuilder {
     auto& remap = DictionaryRemap(input, count);
     NANOARROW_THROW_NOT_OK(
         ArrowBufferReserve(indices.get(), NumericCast<int64_t>(count * sizeof(int32_t))));
+    if (null_count > 0) {
+      NANOARROW_THROW_NOT_OK(
+          ArrowBitmapReserve(validity.get(), NumericCast<int64_t>(count)));
+    }
     for (idx_t i = 0; i < count; i++) {
       const auto index = format.sel->get_index(i);
       if (!format.validity.RowIsValid(index)) {
-        AppendValidity(false);
+        AppendValidity(false, count - i);
         const int32_t null_index = 0;
         ArrowBufferAppendUnsafe(indices.get(), &null_index, sizeof(null_index));
         row_count++;
@@ -77,7 +81,7 @@ class TypedDictionaryBuilder final : public ArrowDictionaryBuilder {
       } else {
         code = Lookup(data[index]);
       }
-      AppendValidity(true);
+      AppendValidity(true, count - i);
       ArrowBufferAppendUnsafe(indices.get(), &code, sizeof(code));
       row_count++;
     }
@@ -140,7 +144,7 @@ class TypedDictionaryBuilder final : public ArrowDictionaryBuilder {
     if (values.size() >= static_cast<idx_t>(NumericLimits<int32_t>::Maximum())) {
       throw InvalidInputException(
           "DICTIONARY_ENCODE cannot index more than %d distinct values in a record "
-          "batch, lower CHUNK_SIZE",
+          "batch",
           NumericLimits<int32_t>::Maximum());
     }
     values.push_back(static_cast<Stored>(OPS::Store(value, heap)));
@@ -164,19 +168,21 @@ class TypedDictionaryBuilder final : public ArrowDictionaryBuilder {
     }
   }
 
-  //! The validity bitmap is only kept from the first NULL on, row_count rows precede
-  void AppendValidity(bool valid) {
+  //! The validity bitmap is only kept from the first NULL on, row_count rows precede it.
+  //! Space for this row and the rest of the chunk, remaining rows, is reserved
+  void AppendValidity(bool valid, idx_t remaining) {
     if (null_count == 0) {
       if (valid) {
         return;
       }
-      NANOARROW_THROW_NOT_OK(
-          ArrowBitmapAppend(validity.get(), 1, NumericCast<int64_t>(row_count)));
+      NANOARROW_THROW_NOT_OK(ArrowBitmapReserve(
+          validity.get(), NumericCast<int64_t>(row_count + remaining)));
+      ArrowBitmapAppendUnsafe(validity.get(), 1, NumericCast<int64_t>(row_count));
     }
     if (!valid) {
       null_count++;
     }
-    NANOARROW_THROW_NOT_OK(ArrowBitmapAppend(validity.get(), valid ? 1 : 0, 1));
+    ArrowBitmapAppendUnsafe(validity.get(), valid ? 1 : 0, 1);
   }
 
   //! DuckDB's Arrow conversion of the distinct values, so they match the schema
@@ -256,6 +262,13 @@ void ArrowDictionaryBuilder::CheckType(const LogicalType& type, const ArrowSchem
       values.dictionary) {
     throw BinderException("DICTIONARY_ENCODE does not support column \"%s\" of type %s",
                           column, type.ToString());
+  }
+  if (type.id() == LogicalTypeId::TIME_TZ) {
+    // Distinct values with different offsets would convert to equal dictionary values
+    throw BinderException(
+        "DICTIONARY_ENCODE does not support column \"%s\" of type %s, whose Arrow "
+        "conversion drops the time zone offset",
+        column, type.ToString());
   }
   // The extension name sits on the field, readers resolve the dictionary type without it
   ArrowStringView extension_name{nullptr, 0};
