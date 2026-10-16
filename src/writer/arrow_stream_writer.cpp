@@ -1,5 +1,7 @@
 #include "writer/arrow_stream_writer.hpp"
 
+#include <cstring>
+
 #include "duckdb/common/bswap.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/numeric_utils.hpp"
@@ -140,6 +142,7 @@ void ArrowStreamWriter::InitSchema(const ArrowSchema& schema_p,
     SetSchemaMetadata(schema.get(), {{kTotalCompressedSize, max_size},
                                      {kTotalUncompressedSize, max_size}});
   }
+  has_dictionaries = HasDictionaries(*schema.get());
   ArrowError error{};
   THROW_NOT_OK(InternalException, &error,
                ArrowBatchStatsInit(&batch_stats, schema.get(), file_format, &error));
@@ -196,9 +199,24 @@ unique_ptr<ColumnDataCollectionSerializer> ArrowStreamWriter::NewSerializer() co
   return serializer;
 }
 
+bool ArrowStreamWriter::UpdateDictionary(const ArrowDictionaryMessage& dictionary) {
+  auto& current = current_dictionaries[dictionary.id];
+  const auto& message = *dictionary.message;
+  if (current && (*current)->size_bytes == message->size_bytes &&
+      std::memcmp((*current)->data, message->data,
+                  NumericCast<size_t>(message->size_bytes)) == 0) {
+    return false;
+  }
+  current = dictionary.message;
+  return true;
+}
+
 void ArrowStreamWriter::Flush(ColumnDataCollectionSerializer& serializer) {
   lock_guard<mutex> guard(lock);
-  auto block = WriteMessage(serializer);
+  // A stream replaces a dictionary with the next one of its id, a repeat is redundant
+  auto block = WriteMessage(serializer, [this](const ArrowDictionaryMessage& dictionary) {
+    return UpdateDictionary(dictionary);
+  });
   if (file_format) {
     blocks.push_back(block);
   }
@@ -235,8 +253,11 @@ void ArrowStreamWriter::Finalize() {
         Value::UBIGINT(batch_stats.total_compressed_size);
     extra_info["total_uncompressed_size"] =
         Value::UBIGINT(batch_stats.total_uncompressed_size);
+    // The bound covers record batches only, not the dictionaries a reader keeps
     extra_info["peak_read_memory_bytes"] =
-        Value::UBIGINT(ArrowBatchStatsPeakReadMemoryBytes(&batch_stats));
+        has_dictionaries
+            ? Value(LogicalType::UBIGINT)
+            : Value::UBIGINT(ArrowBatchStatsPeakReadMemoryBytes(&batch_stats));
     // Final even with SIZE_METADATA, which rewrites the schema at its reserved size
     extra_info["schema_size_bytes"] = Value::UBIGINT(schema_message_size);
   }
@@ -251,8 +272,10 @@ void ArrowStreamWriter::WriteBytes(const_data_ptr_t data, idx_t size) {
 }
 
 ArrowIpcFileBlock ArrowStreamWriter::WriteMessage(
-    ColumnDataCollectionSerializer& serializer) {
-  return async_writer ? serializer.Flush(*async_writer) : serializer.Flush(*writer);
+    ColumnDataCollectionSerializer& serializer,
+    const ArrowDictionaryFilter& write_dictionary) {
+  return async_writer ? serializer.Flush(*async_writer, write_dictionary)
+                      : serializer.Flush(*writer, write_dictionary);
 }
 
 idx_t ArrowStreamWriter::TotalWritten() const {

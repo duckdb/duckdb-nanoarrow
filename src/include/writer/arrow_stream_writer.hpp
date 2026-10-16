@@ -64,7 +64,10 @@ struct ArrowStreamWriter {
   void WriteFooter();
   //! Appends to whichever writer the output uses
   void WriteBytes(const_data_ptr_t data, idx_t size);
-  ArrowIpcFileBlock WriteMessage(ColumnDataCollectionSerializer& serializer);
+  ArrowIpcFileBlock WriteMessage(ColumnDataCollectionSerializer& serializer,
+                                 const ArrowDictionaryFilter& write_dictionary = nullptr);
+  //! Makes the dictionary the current one of its id, false when it already was
+  bool UpdateDictionary(const ArrowDictionaryMessage& dictionary);
   idx_t TotalWritten() const;
 
   ClientProperties options;
@@ -89,6 +92,9 @@ struct ArrowStreamWriter {
   atomic<idx_t> row_group_count{0};
   atomic<idx_t> file_size{0};
   nanoarrow::UniqueSchema schema;
+  bool has_dictionaries = false;
+  //! The dictionary last written for each id
+  unordered_map<int64_t, shared_ptr<nanoarrow::UniqueBuffer>> current_dictionaries;
 };
 
 }  // namespace ext_nanoarrow

@@ -32,7 +32,7 @@ struct ToArrowIpcGlobalState : public GlobalTableFunctionState {
 };
 
 struct ToArrowIpcLocalState : public LocalTableFunctionState {
-  unique_ptr<ArrowAppender> appender;
+  unique_ptr<ArrowBatchBuilder> builder;
   unique_ptr<ColumnDataCollectionSerializer> serializer;
   idx_t current_count = 0;
   bool checked_schema = false;
@@ -59,9 +59,14 @@ unique_ptr<FunctionData> ToArrowIPCFunction::Bind(ClientContext& context,
                                                   vector<LogicalType>& return_types,
                                                   vector<Identifier>& names) {
   auto result = make_uniq<ToArrowIpcFunctionData>();
+  vector<idx_t> dictionary_columns;
   for (auto& kv : input.named_parameters) {
     if (kv.second.IsNull()) {
       throw BinderException("Cannot use NULL as function argument");
+    }
+    if (StringUtil::CIEquals(kv.first.GetIdentifierName(), "dictionary_encode")) {
+      dictionary_columns = ReadDictionaryColumns({kv.second}, input.input_table_names);
+      continue;
     }
     result->compression.TrySetOption(kv.first.GetIdentifierName(), kv.second);
   }
@@ -74,18 +79,16 @@ unique_ptr<FunctionData> ToArrowIPCFunction::Bind(ClientContext& context,
 
   result->options = context.GetClientProperties();
   result->logical_types = input.input_table_types;
+  // Each row holds whole messages: a record batch comes with its dictionaries
   result->schema = CreateArrowIpcSchema(input.input_table_types, input.input_table_names,
-                                        result->options);
+                                        result->options, dictionary_columns, true);
   return std::move(result);
 }
 
 void SerializeArray(const ToArrowIpcLocalState& local_state,
                     nanoarrow::UniqueBuffer& arrow_serialized_ipc_buffer) {
-  local_state.serializer->Serialize(*local_state.appender);
-  arrow_serialized_ipc_buffer = local_state.serializer->GetHeader();
-  auto body = local_state.serializer->GetBody();
-  NANOARROW_THROW_NOT_OK(
-      ArrowBufferAppend(arrow_serialized_ipc_buffer.get(), body->data, body->size_bytes));
+  local_state.serializer->Serialize(*local_state.builder);
+  arrow_serialized_ipc_buffer = local_state.serializer->TakeMessages();
 }
 
 void InsertMessageToChunk(nanoarrow::UniqueBuffer& arrow_serialized_ipc_buffer,
@@ -128,18 +131,16 @@ OperatorResultType ToArrowIPCFunction::Function(ExecutionContext& context,
     arrow_serialized_ipc_buffer = local_state.serializer->GetHeader();
     output.data[1].Append(Value::BOOLEAN(true));
   } else {
-    if (!local_state.appender) {
-      local_state.appender = make_uniq<ArrowAppender>(
-          input.GetTypes(), data.chunk_size, data.options,
-          ArrowTypeExtensionData::GetExtensionTypes(context.client, input.GetTypes()));
+    if (!local_state.builder) {
+      local_state.builder = local_state.serializer->NewBatchBuilder(data.chunk_size);
     }
 
-    local_state.appender->Append(input, 0, input.size(), input.size());
+    local_state.builder->Append(input);
     local_state.current_count += input.size();
 
     if (caching_disabled || local_state.current_count >= data.chunk_size) {
       SerializeArray(local_state, arrow_serialized_ipc_buffer);
-      local_state.appender.reset();
+      local_state.builder.reset();
       local_state.current_count = 0;
 
       output.data[1].Append(Value::BOOLEAN(false));
@@ -160,7 +161,7 @@ OperatorFinalizeResultType ToArrowIPCFunction::FunctionFinal(ExecutionContext& c
                                                              DataChunk& output) {
   auto& local_state = data_p.local_state->Cast<ToArrowIpcLocalState>();
 
-  if (local_state.appender) {
+  if (local_state.builder) {
     nanoarrow::UniqueBuffer arrow_serialized_ipc_buffer;
     SerializeArray(local_state, arrow_serialized_ipc_buffer);
     InsertMessageToChunk(arrow_serialized_ipc_buffer, output);
@@ -178,7 +179,8 @@ TableFunction ToArrowIPCFunction::GetFunction() {
   fun.in_out_function_final = FunctionFinal;
   fun.GetSignature().WithTypedKwargs("options", [](TypedKwargs& options) {
     options.Add("compression", LogicalType::VARCHAR)
-        .Add("compression_level", LogicalType::BIGINT);
+        .Add("compression_level", LogicalType::BIGINT)
+        .Add("dictionary_encode", LogicalType::LIST(LogicalType::VARCHAR));
   });
   return fun;
 }

@@ -26,19 +26,22 @@ SELECT sum((test.time = written.time)::INTEGER) FROM test INNER JOIN written ON 
 ----
 15487
 
-# Dictionaries, nested ones too, are rejected until DictionaryBatch messages get written
+# ENUMs, nested ones too, are written dictionary encoded and read back as VARCHAR
 statement ok
 CREATE TYPE mood AS ENUM ('happy', 'sad');
 
-statement error
-COPY (SELECT 'happy'::mood AS m) TO '{DATA_PATH}/enum.arrows' (FORMAT ARROWS, COMPRESSION ZSTD);
-----
-Arrow IPC output does not support ENUM values
+statement ok
+COPY (SELECT 'happy'::mood AS m, {'m': 'sad'::mood} AS s) TO '{DATA_PATH}/enum.arrows' (FORMAT ARROWS, COMPRESSION ZSTD);
 
-statement error
-FROM to_arrow_ipc((SELECT {'m': 'happy'::mood}), compression := 'lz4');
+query II
+FROM read_arrow('{DATA_PATH}/enum.arrows');
 ----
-Arrow IPC output does not support ENUM values
+happy	{'m': sad}
+
+query I
+SELECT count(*) FROM to_arrow_ipc((SELECT {'m': 'happy'::mood}), compression := 'lz4');
+----
+2
 
 # String views cannot be written yet, the error must not be an internal one
 statement ok
