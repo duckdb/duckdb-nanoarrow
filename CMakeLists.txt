@@ -6,10 +6,11 @@ set(TARGET_NAME nanoarrow)
 
 set(NANOARROW_IPC ON)
 set(NANOARROW_NAMESPACE "DuckDBExt${TARGET_NAME}")
-# nanoarrow main with IPC body compression (#935), move to a release tag once one ships it
+# nanoarrow main with IPC body compression (#935) and run-end encoded IPC reading (#996),
+# move to a release tag once one ships them
 fetchcontent_declare(nanoarrow
-                     URL "https://github.com/apache/arrow-nanoarrow/archive/665794510011c07d4a6932b248608c2c02113796.zip"
-                     URL_HASH SHA256=a81178c68929c74e97cff6b02f9a9f77fc656966ad7dbc4ae858cb45496d6b6f
+                     URL "https://github.com/apache/arrow-nanoarrow/archive/ff94a0e1e21ee295b7fb11dc94fdc04bb281b10b.zip"
+                     URL_HASH SHA256=5ccbe0e4f3a0cd1be1d63c3024e4d5bd767f36eae31c1b28c73ba05a29c010e3
 )
 # nanoarrow compresses and decompresses itself with liblz4 and libzstd, from vcpkg in CI.
 # Builds without vcpkg, such as DuckDB-Wasm, can opt out of the codecs: compressed IPC
