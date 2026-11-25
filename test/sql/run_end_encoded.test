@@ -1,0 +1,65 @@
+# name: test/sql/run_end_encoded.test
+# description: test reading run-end encoded arrays from Arrow IPC streams and files
+# group: [sql]
+
+# Require statement will ensure this test is run with this extension loaded
+require nanoarrow
+
+# Written by Arrow C++ 21.0.0: an empty batch, then batches of 7 and 20 rows, with
+# int16, int32 and int64 run ends and nulls among the run values
+statement ok
+SET VARIABLE ree_file = '{WORKING_DIRECTORY}/arrow-testing/data/arrow-ipc-stream/integration/cpp-21.0.0/generated_run_end_encoded';
+
+foreach extension stream arrow_file
+
+# Run-end encoded columns are read as their value type
+query II
+SELECT column_name, column_type FROM (DESCRIBE FROM read_arrow(getvariable('ree_file') || '.{extension}'));
+----
+ree16_int32	INTEGER
+ree32_utf8	VARCHAR
+ree64_float32	FLOAT
+ree16_bool	BOOLEAN
+bool	BOOLEAN
+
+query I
+SELECT count(*) FROM read_arrow(getvariable('ree_file') || '.{extension}');
+----
+27
+
+# Each run is expanded to one value per row
+query II
+SELECT ree16_int32, count(*) FROM read_arrow(getvariable('ree_file') || '.{extension}') GROUP BY ALL ORDER BY ALL;
+----
+-2147483648	7
+-1406995286	1
+508899456	3
+569694446	1
+1014549102	3
+2147483647	1
+NULL	11
+
+query II
+SELECT ree32_utf8, count(*) FROM read_arrow(getvariable('ree_file') || '.{extension}') GROUP BY ALL ORDER BY ALL;
+----
+afôjkbe	2
+g2j£r2d	1
+pa€wlio	2
+NULL	22
+
+query II
+SELECT ree64_float32, count(*) FROM read_arrow(getvariable('ree_file') || '.{extension}') GROUP BY ALL ORDER BY ALL;
+----
+-2282.297	6
+129.264	7
+777.372	2
+NULL	12
+
+query II
+SELECT ree16_bool, count(*) FROM read_arrow(getvariable('ree_file') || '.{extension}') GROUP BY ALL ORDER BY ALL;
+----
+false	1
+true	18
+NULL	8
+
+endloop
